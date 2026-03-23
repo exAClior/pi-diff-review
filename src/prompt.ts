@@ -1,13 +1,16 @@
-import type { DiffReviewComment, DiffReviewFile, ReviewSubmitPayload } from "./types.js";
+import type { DiffReviewFile, ReviewComment, ReviewSubmitPayload } from "./types.js";
 
-function formatLocation(comment: DiffReviewComment, filePath: string): string {
-  if (comment.side === "file" || comment.startLine == null) {
+function formatLocation(comment: ReviewComment, filePath: string): string {
+  if (comment.kind === "file" || comment.startLine == null) {
     return filePath;
   }
-  const suffix = comment.side === "original" ? " (old)" : " (new)";
+
+  const suffix = comment.side === "deletions" ? " (old)" : " (new)";
+
   if (comment.endLine != null && comment.endLine !== comment.startLine) {
     return `${filePath}:${comment.startLine}-${comment.endLine}${suffix}`;
   }
+
   return `${filePath}:${comment.startLine}${suffix}`;
 }
 

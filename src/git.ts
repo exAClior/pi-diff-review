@@ -137,6 +137,10 @@ function toDisplayPath(change: ChangedPath): string {
   return change.newPath ?? change.oldPath ?? "(unknown)";
 }
 
+function toTreePath(change: ChangedPath): string {
+  return change.newPath ?? change.oldPath ?? "(unknown)";
+}
+
 export async function getDiffReviewFiles(pi: ExtensionAPI, cwd: string): Promise<{ repoRoot: string; files: DiffReviewFile[] }> {
   const repoRoot = await getRepoRoot(pi, cwd);
   const repositoryHasHead = await hasHead(pi, repoRoot);
@@ -160,6 +164,7 @@ export async function getDiffReviewFiles(pi: ExtensionAPI, cwd: string): Promise
         oldPath: change.oldPath,
         newPath: change.newPath,
         displayPath: toDisplayPath(change),
+        treePath: toTreePath(change),
         oldContent,
         newContent,
       };

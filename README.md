@@ -1,37 +1,47 @@
 # pi-diff-review
 
-This is pure slop, see: https://pi.dev/session/#d4ce533cedbd60040f2622dc3db950e2
+Minimal browser diff review UI for pi.
 
-It is my hope, that someone takes this idea and makes it gud.
+It keeps the original idea from the session thread, but drops the native window and Monaco plumbing in favor of a smaller browser-only flow:
 
-Native diff review window for pi, powered by [Glimpse](https://github.com/hazat/glimpse) and Monaco.
+- `/diff-review` collects the current git diff against `HEAD`
+- pi starts a tiny localhost server and opens your browser
+- `@pierre/trees` renders the changed-file tree
+- `@pierre/diffs` renders the active file diff
+- you can add file comments, line comments, and same-side range comments
+- submitting writes a review prompt back into the pi editor
 
-```
+## Install
+
+```bash
 pi install git:https://github.com/badlogic/pi-diff-review
 ```
 
-## What it does
-
-Adds a `/diff-review` command to pi.
-
-The command:
-
-1. collects the current git diff against `HEAD`
-2. opens a native review window
-3. shows changed files in a Monaco diff editor
-4. lets you draft comments on the original side, modified side, or whole file
-5. inserts the resulting feedback prompt into the pi editor when you submit
-
 ## Requirements
 
-- macOS, Linux, or Windows
 - Node.js 20+
 - `pi` installed
-- internet access for the Tailwind and Monaco CDNs used by the review window
+- a modern browser
 
-### Windows notes
+## Development
 
-Glimpse now supports Windows. To build the native host during install you need:
+```bash
+npm install
+npm run build:web
+npm run check
+npm test
+```
 
-- .NET 8 SDK
-- Microsoft Edge WebView2 Runtime
+Edit the browser app in `web/app-source.js`. The browser build emits the entry
+chunk at `web/app.js` plus code-split assets in `web/chunks/` so Shiki
+languages and themes load on demand instead of inflating one giant bundle.
+
+## What changed from the old version
+
+- removed Glimpse/native window integration
+- removed Monaco
+- kept the pi extension command flow
+- moved the UI to a tiny browser app served from localhost
+- switched rendering to Pierre:
+  - `@pierre/diffs` for the main diff view
+  - `@pierre/trees` for the file tree

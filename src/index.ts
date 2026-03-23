@@ -1,27 +1,48 @@
+import { spawn } from "node:child_process";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
-import { open, type GlimpseWindow } from "glimpseui";
 import { getDiffReviewFiles } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
-import type { ReviewSubmitPayload, ReviewWindowMessage } from "./types.js";
-import { buildReviewHtml } from "./ui.js";
+import { startReviewServer, type ReviewServerSession } from "./server.js";
+import { type ReviewSessionResult } from "./types.js";
 
-function isSubmitPayload(value: ReviewWindowMessage): value is ReviewSubmitPayload {
-  return value.type === "submit";
+type WaitingEditorResult = "escape" | "review-settled";
+
+// Open the review URL in the user's default browser without dragging pi into
+// any browser-specific integration details.
+async function openBrowser(url: string): Promise<void> {
+  const command =
+    process.platform === "darwin"
+      ? { file: "open", args: [url] }
+      : process.platform === "win32"
+        ? { file: "cmd", args: ["/c", "start", "", url] }
+        : { file: "xdg-open", args: [url] };
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command.file, command.args, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
 }
 
-type WaitingEditorResult = "escape" | "window-settled";
-
 export default function (pi: ExtensionAPI) {
-  let activeWindow: GlimpseWindow | null = null;
+  let activeSession: ReviewServerSession | null = null;
   let activeWaitingUIDismiss: (() => void) | null = null;
 
-  function closeActiveWindow(): void {
-    if (activeWindow == null) return;
-    const windowToClose = activeWindow;
-    activeWindow = null;
+  async function closeActiveSession(): Promise<void> {
+    if (activeSession == null) return;
+    const session = activeSession;
+    activeSession = null;
     try {
-      windowToClose.close();
+      await session.close();
     } catch {}
   }
 
@@ -60,9 +81,9 @@ export default function (pi: ExtensionAPI) {
           const borderTop = theme.fg("border", `╭${"─".repeat(innerWidth)}╮`);
           const borderBottom = theme.fg("border", `╰${"─".repeat(innerWidth)}╯`);
           const lines = [
-            theme.fg("accent", theme.bold("Waiting for review")),
-            "The native diff review window is open.",
-            "Press Escape to cancel and close the review window.",
+            theme.fg("accent", theme.bold("Waiting for browser review")),
+            "A diff review page is open in your browser.",
+            "Press Escape to cancel the review and shut down the local server.",
           ];
           return [
             borderTop,
@@ -80,7 +101,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     const dismiss = (): void => {
-      finish("window-settled");
+      finish("review-settled");
     };
 
     activeWaitingUIDismiss = dismiss;
@@ -92,8 +113,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function reviewDiff(ctx: ExtensionCommandContext): Promise<void> {
-    if (activeWindow != null) {
-      ctx.ui.notify("A diff review window is already open.", "warning");
+    if (activeSession != null) {
+      ctx.ui.notify("A diff review is already in progress.", "warning");
       return;
     }
 
@@ -103,83 +124,33 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const html = buildReviewHtml({ repoRoot, files });
-    const window = open(html, {
-      width: 1680,
-      height: 1020,
-      title: "pi diff review",
-    });
-    activeWindow = window;
-
-    const waitingUI = showWaitingUI(ctx);
-
-    ctx.ui.notify("Opened native diff review window.", "info");
+    const session = await startReviewServer({ repoRoot, files });
+    activeSession = session;
 
     try {
-      const windowMessagePromise = new Promise<ReviewWindowMessage | null>((resolve, reject) => {
-        let settled = false;
+      await openBrowser(session.url);
+      ctx.ui.notify("Opened diff review in your browser.", "info");
 
-        const cleanup = (): void => {
-          window.removeListener("message", onMessage);
-          window.removeListener("closed", onClosed);
-          window.removeListener("error", onError);
-          if (activeWindow === window) {
-            activeWindow = null;
-          }
-        };
-
-        const settle = (value: ReviewWindowMessage | null): void => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          resolve(value);
-        };
-
-        const onMessage = (data: unknown): void => {
-          settle(data as ReviewWindowMessage);
-        };
-
-        const onClosed = (): void => {
-          settle(null);
-        };
-
-        const onError = (error: Error): void => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(error);
-        };
-
-        window.on("message", onMessage);
-        window.on("closed", onClosed);
-        window.on("error", onError);
-      });
+      const waitingUI = showWaitingUI(ctx);
 
       const result = await Promise.race([
-        windowMessagePromise.then((message) => ({ type: "window" as const, message })),
+        session.waitForResult().then((message) => ({ type: "browser" as const, message })),
         waitingUI.promise.then((reason) => ({ type: "ui" as const, reason })),
       ]);
 
       if (result.type === "ui" && result.reason === "escape") {
-        closeActiveWindow();
-        await windowMessagePromise.catch(() => null);
+        await session.cancel();
         ctx.ui.notify("Diff review cancelled.", "info");
         return;
       }
 
-      const message = result.type === "window" ? result.message : await windowMessagePromise;
+      const message: ReviewSessionResult = result.type === "browser" ? result.message : await session.waitForResult();
 
       waitingUI.dismiss();
       await waitingUI.promise;
-      closeActiveWindow();
 
-      if (message == null || message.type === "cancel") {
+      if (message.type === "cancel") {
         ctx.ui.notify("Diff review cancelled.", "info");
-        return;
-      }
-
-      if (!isSubmitPayload(message)) {
-        ctx.ui.notify("Diff review returned an unknown payload.", "error");
         return;
       }
 
@@ -187,15 +158,16 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setEditorText(prompt);
       ctx.ui.notify("Inserted diff review feedback into the editor.", "info");
     } catch (error) {
-      activeWaitingUIDismiss?.();
-      closeActiveWindow();
       const message = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`Diff review failed: ${message}`, "error");
+    } finally {
+      activeWaitingUIDismiss?.();
+      await closeActiveSession();
     }
   }
 
   pi.registerCommand("diff-review", {
-    description: "Open a native diff review window and insert review feedback into the editor",
+    description: "Open a browser diff review page and insert review feedback into the editor",
     handler: async (_args, ctx) => {
       await reviewDiff(ctx);
     },
@@ -203,6 +175,6 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     activeWaitingUIDismiss?.();
-    closeActiveWindow();
+    await closeActiveSession();
   });
 }
