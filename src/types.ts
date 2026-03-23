@@ -1,5 +1,23 @@
 export type ChangeStatus = "modified" | "added" | "deleted" | "renamed";
 
+export interface HunkExplanation {
+  id: string;
+  fileId: string;
+  anchorSide: ReviewCommentSide;
+  anchorLine: number;
+  oldStartLine: number | null;
+  oldEndLine: number | null;
+  newStartLine: number | null;
+  newEndLine: number | null;
+  body: string;
+}
+
+export interface ExplanationReply {
+  id: string;
+  explanationId: string;
+  body: string;
+}
+
 export interface DiffReviewFile {
   id: string;
   status: ChangeStatus;
@@ -9,6 +27,7 @@ export interface DiffReviewFile {
   treePath: string;
   oldContent: string;
   newContent: string;
+  hunkExplanations: HunkExplanation[];
 }
 
 export type ReviewCommentKind = "file" | "line" | "range";
@@ -46,6 +65,7 @@ export type ReviewComment = FileReviewComment | LineReviewComment | RangeReviewC
 export interface ReviewSubmitPayload {
   type: "submit";
   overallComment: string;
+  explanationReplies: ExplanationReply[];
   comments: ReviewComment[];
 }
 
@@ -55,9 +75,32 @@ export interface ReviewCancelPayload {
 
 export type ReviewSessionResult = ReviewSubmitPayload | ReviewCancelPayload;
 
+export type ExplanationRunState = "generated" | "partial" | "completed-without-explanations" | "skipped-no-model" | "skipped-no-auth";
+
+export type ExplanationFileReason = "generated" | "no-hunks" | "empty-response" | "invalid-response" | "no-usable-explanations" | "request-failed";
+
+export interface ExplanationFileStatus {
+  fileId: string;
+  displayPath: string;
+  hunkCount: number;
+  generatedCount: number;
+  reason: ExplanationFileReason;
+  message: string;
+}
+
+export interface ExplanationStatus {
+  state: ExplanationRunState;
+  attempted: boolean;
+  modelLabel: string | null;
+  generatedCount: number;
+  summary: string;
+  fileStatuses: ExplanationFileStatus[];
+}
+
 export interface DiffReviewWindowData {
   repoRoot: string;
   files: DiffReviewFile[];
+  explanationStatus?: ExplanationStatus;
 }
 
 function isLineNumber(value: unknown): value is number {
@@ -70,6 +113,13 @@ function isReviewCommentSide(value: unknown): value is ReviewCommentSide {
 
 function hasCommonCommentFields(candidate: Record<string, unknown>): candidate is Record<string, unknown> & ReviewCommentBase {
   return typeof candidate.id === "string" && typeof candidate.fileId === "string" && typeof candidate.body === "string";
+}
+
+function isExplanationReply(value: unknown): value is ExplanationReply {
+  if (typeof value !== "object" || value == null) return false;
+
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.id === "string" && typeof candidate.explanationId === "string" && typeof candidate.body === "string";
 }
 
 // Keep the runtime validator aligned with the comment shapes we actually emit
@@ -115,6 +165,8 @@ export function isReviewSubmitPayload(value: unknown): value is ReviewSubmitPayl
   return (
     candidate.type === "submit" &&
     typeof candidate.overallComment === "string" &&
+    Array.isArray(candidate.explanationReplies) &&
+    candidate.explanationReplies.every(isExplanationReply) &&
     Array.isArray(candidate.comments) &&
     candidate.comments.every(isReviewComment)
   );

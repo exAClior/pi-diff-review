@@ -23,12 +23,27 @@ const state = {
   activeFileId: reviewData.files[0].id,
   overallComment: "",
   comments: [],
+  explanationReplies: reviewData.files.flatMap((file) =>
+    (Array.isArray(file.hunkExplanations) ? file.hunkExplanations : []).map((explanation) => ({
+      id: `${explanation.id}:reply`,
+      explanationId: explanation.id,
+      body: "",
+    })),
+  ),
   busy: false,
   settled: false,
 };
 
 const filesById = new Map(reviewData.files.map((file) => [file.id, file]));
 const filesByTreePath = new Map(reviewData.files.map((file) => [file.treePath, file]));
+const explanationsById = new Map(
+  reviewData.files.flatMap((file) => (Array.isArray(file.hunkExplanations) ? file.hunkExplanations : []).map((explanation) => [explanation.id, explanation])),
+);
+const explanationRepliesByExplanationId = new Map(state.explanationReplies.map((reply) => [reply.explanationId, reply]));
+const totalExplanationCount = reviewData.files.reduce(
+  (count, file) => count + (Array.isArray(file.hunkExplanations) ? file.hunkExplanations.length : 0),
+  0,
+);
 
 const repoRootEl = document.getElementById("repo-root");
 const summaryEl = document.getElementById("summary");
@@ -81,6 +96,14 @@ const diff = new FileDiff({
     addInlineCommentFromRange(range);
   },
   renderAnnotation(annotation) {
+    if (annotation.metadata?.kind === "hunk-explanation") {
+      const explanation = explanationsById.get(annotation.metadata.explanationId);
+      if (explanation == null) {
+        return document.createElement("div");
+      }
+      return createExplanationCard(explanation, { inline: true });
+    }
+
     const comment = state.comments.find((item) => item.id === annotation.metadata.commentId);
     if (comment == null) {
       return document.createElement("div");
@@ -147,6 +170,14 @@ renderChrome();
 renderFileComments();
 mountActiveFile();
 
+if (
+  typeof reviewData.explanationStatus?.summary === "string" &&
+  reviewData.explanationStatus.summary.length > 0 &&
+  reviewData.explanationStatus.state !== "generated"
+) {
+  showFlash(reviewData.explanationStatus.summary, "warning", true);
+}
+
 function fatal(message) {
   document.body.innerHTML = `<main style="display:grid;place-items:center;min-height:100vh;background:#0d1117;color:#c9d1d9;font-family:Inter,system-ui,sans-serif;padding:24px;text-align:center;"><div><h1 style="margin:0 0 12px;font-size:20px;">Diff review failed</h1><p style="margin:0;color:#8b949e;">${escapeHtml(message)}</p></div></main>`;
   throw new Error(message);
@@ -188,10 +219,15 @@ function describeFileStatus(file) {
   return "Click or drag in the gutter to add line or range comments on one side of the diff.";
 }
 
+function countCompletedExplanationReplies() {
+  return state.explanationReplies.reduce((count, reply) => count + (reply.body.trim().length > 0 ? 1 : 0), 0);
+}
+
 function renderChrome() {
   const file = activeFile();
   const commentCount = state.comments.length;
-  summaryEl.textContent = `${reviewData.files.length} file(s) · ${commentCount} comment(s)${state.overallComment ? " · overall note" : ""}`;
+  const explanationReplyCount = countCompletedExplanationReplies();
+  summaryEl.textContent = `${reviewData.files.length} file(s) · ${totalExplanationCount} explainer note(s) · ${commentCount} comment(s)${explanationReplyCount > 0 ? ` · ${explanationReplyCount} explainer repl${explanationReplyCount === 1 ? "y" : "ies"}` : ""}${state.overallComment ? " · overall note" : ""}`;
   currentFileLabelEl.textContent = file.displayPath;
   currentFileMetaEl.textContent = describeFileStatus(file);
 
@@ -250,7 +286,17 @@ function refreshInlineComments() {
 }
 
 function buildInlineAnnotations(fileId) {
-  return state.comments
+  const file = filesById.get(fileId);
+  const explanationAnnotations = (Array.isArray(file?.hunkExplanations) ? file.hunkExplanations : []).map((explanation) => ({
+    side: explanation.anchorSide,
+    lineNumber: explanation.anchorLine,
+    metadata: {
+      kind: "hunk-explanation",
+      explanationId: explanation.id,
+    },
+  }));
+
+  const commentAnnotations = state.comments
     .filter((comment) => comment.fileId === fileId && comment.kind !== "file" && comment.side != null && comment.startLine != null)
     .map((comment) => ({
       side: comment.side,
@@ -259,6 +305,8 @@ function buildInlineAnnotations(fileId) {
         commentId: comment.id,
       },
     }));
+
+  return [...explanationAnnotations, ...commentAnnotations];
 }
 
 function addInlineCommentFromRange(range) {
@@ -297,16 +345,25 @@ function addInlineCommentFromRange(range) {
 
 function renderFileComments() {
   const file = activeFile();
+  const explanations = Array.isArray(file.hunkExplanations) ? file.hunkExplanations : [];
   const comments = state.comments.filter((comment) => comment.fileId === file.id && comment.kind === "file");
 
   fileCommentsEl.innerHTML = "";
-  fileCommentsEl.hidden = comments.length === 0;
-  if (comments.length === 0) {
+  fileCommentsEl.hidden = explanations.length === 0 && comments.length === 0;
+  if (fileCommentsEl.hidden) {
     return;
   }
 
-  for (const comment of comments) {
-    fileCommentsEl.appendChild(createCommentCard(comment));
+  if (explanations.length > 0) {
+    fileCommentsEl.appendChild(createNotesSectionLabel("LLM explainer notes"));
+    fileCommentsEl.appendChild(createExplanationHelpCard(explanations.length));
+  }
+
+  if (comments.length > 0) {
+    fileCommentsEl.appendChild(createNotesSectionLabel("File comments"));
+    for (const comment of comments) {
+      fileCommentsEl.appendChild(createCommentCard(comment));
+    }
   }
 }
 
@@ -320,6 +377,107 @@ function describeCommentTarget(comment) {
     return `${sideLabel} lines ${comment.startLine}-${comment.endLine}`;
   }
   return `${sideLabel} line ${comment.startLine}`;
+}
+
+function createNotesSectionLabel(text) {
+  const label = document.createElement("div");
+  label.className = "notes-section-label";
+  label.textContent = text;
+  return label;
+}
+
+function formatExplanationRange(label, startLine, endLine) {
+  if (startLine == null || endLine == null) {
+    return null;
+  }
+
+  if (startLine === endLine) {
+    return `${label} ${startLine}`;
+  }
+
+  return `${label} ${startLine}-${endLine}`;
+}
+
+function describeExplanationTarget(explanation) {
+  const parts = [
+    formatExplanationRange("old", explanation.oldStartLine, explanation.oldEndLine),
+    formatExplanationRange("new", explanation.newStartLine, explanation.newEndLine),
+  ].filter(Boolean);
+
+  return parts.length > 0 ? parts.join(" · ") : "hunk explanation";
+}
+
+function createExplanationHelpCard(explanationCount) {
+  const card = document.createElement("section");
+  card.className = "comment-card explanation-card explanation-help-card";
+
+  const title = document.createElement("div");
+  title.className = "comment-card-title";
+  title.textContent = "Explainer notes are attached inline in the diff";
+
+  const body = document.createElement("p");
+  body.className = "explanation-help-body";
+  body.textContent = `${explanationCount} LLM explainer note(s) are attached below the relevant changed lines. Reply under any note in the diff to correct it or add missing context before you submit.`;
+
+  card.append(title, body);
+  return card;
+}
+
+function createExplanationCard(explanation, options = {}) {
+  const reply = explanationRepliesByExplanationId.get(explanation.id);
+  const card = document.createElement("section");
+  card.className = `comment-card explanation-card${options.inline ? " inline-comment" : ""}`;
+
+  const header = document.createElement("div");
+  header.className = "comment-card-header";
+
+  const heading = document.createElement("div");
+  heading.className = "comment-card-heading";
+
+  const badge = document.createElement("span");
+  badge.className = "explanation-badge";
+  badge.textContent = "LLM explainer";
+
+  const title = document.createElement("div");
+  title.className = "comment-card-title";
+  title.textContent = describeExplanationTarget(explanation);
+
+  heading.append(badge, title);
+  header.append(heading);
+
+  const body = document.createElement("p");
+  body.className = "explanation-body";
+  body.textContent = explanation.body;
+
+  card.append(header, body);
+
+  if (reply != null) {
+    const replyLabel = document.createElement("label");
+    replyLabel.className = "reply-label";
+    replyLabel.textContent = "Your reply";
+
+    const replyHint = document.createElement("div");
+    replyHint.className = "reply-hint";
+    replyHint.textContent = "Included in the submitted prompt so pi can revise this explanation.";
+
+    const textarea = document.createElement("textarea");
+    textarea.className = "explanation-reply";
+    textarea.placeholder = "Tell pi what this explanation got wrong, missed, or should emphasize.";
+    textarea.value = reply.body;
+    textarea.disabled = state.busy || state.settled;
+    textarea.addEventListener("input", () => {
+      const hadReply = reply.body.trim().length > 0;
+      reply.body = textarea.value;
+      const hasReply = reply.body.trim().length > 0;
+      if (hadReply !== hasReply) {
+        renderChrome();
+      }
+    });
+
+    card.append(replyLabel, replyHint, textarea);
+  }
+
+  return card;
 }
 
 function createCommentCard(comment, options = {}) {
@@ -443,6 +601,13 @@ function buildSubmitPayload() {
   return {
     type: "submit",
     overallComment: state.overallComment.trim(),
+    explanationReplies: state.explanationReplies
+      .map((reply) => ({
+        id: reply.id,
+        explanationId: reply.explanationId,
+        body: reply.body.trim(),
+      }))
+      .filter((reply) => reply.body.length > 0),
     comments: state.comments
       .map((comment) => ({
         id: comment.id,

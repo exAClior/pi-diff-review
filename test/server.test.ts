@@ -19,6 +19,7 @@ const sampleData: DiffReviewWindowData = {
       treePath: "src/example.ts",
       oldContent: "export const value = 1;\n",
       newContent: "export const value = 2;\n",
+      hunkExplanations: [],
     },
   ],
 };
@@ -84,6 +85,13 @@ test("review server resolves the session with the submitted payload", async (t) 
   const payload: ReviewSubmitPayload = {
     type: "submit",
     overallComment: "Please fix the naming and simplify the branch.",
+    explanationReplies: [
+      {
+        id: "reply-1",
+        explanationId: "file-1:explanation:0",
+        body: "This change also alters behavior and the explanation should mention that.",
+      },
+    ],
     comments: [
       {
         id: "comment-1",

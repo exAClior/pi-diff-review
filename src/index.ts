@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
+import { addHunkExplanations } from "./explain.js";
 import { getDiffReviewFiles } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
 import { startReviewServer, type ReviewServerSession } from "./server.js";
@@ -124,7 +125,16 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const session = await startReviewServer({ repoRoot, files });
+    const explanationResult = await addHunkExplanations(pi, ctx, repoRoot, files);
+    const { files: filesWithExplanations, status: explanationStatus } = explanationResult;
+
+    ctx.ui.notify(explanationStatus.summary, explanationStatus.state === "generated" ? "info" : "warning");
+
+    const session = await startReviewServer({
+      repoRoot,
+      files: filesWithExplanations,
+      explanationStatus,
+    });
     activeSession = session;
 
     try {
@@ -154,7 +164,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const prompt = composeReviewPrompt(files, message);
+      const prompt = composeReviewPrompt(filesWithExplanations, message);
       ctx.ui.setEditorText(prompt);
       ctx.ui.notify("Inserted diff review feedback into the editor.", "info");
     } catch (error) {

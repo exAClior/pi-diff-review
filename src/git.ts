@@ -167,6 +167,7 @@ export async function getDiffReviewFiles(pi: ExtensionAPI, cwd: string): Promise
         treePath: toTreePath(change),
         oldContent,
         newContent,
+        hunkExplanations: [],
       };
     }),
   );
