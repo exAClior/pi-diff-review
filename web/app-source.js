@@ -1,5 +1,12 @@
 import { FileDiff } from "@pierre/diffs";
 import { FileTree } from "@pierre/trees";
+import {
+  describeCommentSubmissionState,
+  getCommentDraft,
+  isCommentSubmitted,
+  needsCommentSubmission,
+  submitCommentDraft,
+} from "./comment-submission.js";
 
 const token = new URL(window.location.href).searchParams.get("token");
 
@@ -139,9 +146,9 @@ fileCommentButton.addEventListener("click", () => {
   const file = activeFile();
   showTextModal({
     title: `File comment for ${file.displayPath}`,
-    description: "Use this for feedback that applies to the whole file instead of one line or range.",
+    description: "Use this for feedback that applies to the whole file instead of one line or range. The comment stays draft until you submit it on the card.",
     initialValue: "",
-    saveLabel: "Add comment",
+    saveLabel: "Create draft",
     onSave(value) {
       const body = value.trim();
       if (body.length === 0) return;
@@ -152,7 +159,8 @@ fileCommentButton.addEventListener("click", () => {
         side: null,
         startLine: null,
         endLine: null,
-        body,
+        body: "",
+        draftBody: body,
       });
       renderChrome();
       renderFileComments();
@@ -225,9 +233,10 @@ function countCompletedExplanationReplies() {
 
 function renderChrome() {
   const file = activeFile();
-  const commentCount = state.comments.length;
+  const submittedCommentCount = state.comments.filter(isCommentSubmitted).length;
+  const draftCommentCount = state.comments.filter(needsCommentSubmission).length;
   const explanationReplyCount = countCompletedExplanationReplies();
-  summaryEl.textContent = `${reviewData.files.length} file(s) · ${totalExplanationCount} explainer note(s) · ${commentCount} comment(s)${explanationReplyCount > 0 ? ` · ${explanationReplyCount} explainer repl${explanationReplyCount === 1 ? "y" : "ies"}` : ""}${state.overallComment ? " · overall note" : ""}`;
+  summaryEl.textContent = `${reviewData.files.length} file(s) · ${totalExplanationCount} explainer note(s) · ${submittedCommentCount} submitted comment(s)${draftCommentCount > 0 ? ` · ${draftCommentCount} draft comment(s)` : ""}${explanationReplyCount > 0 ? ` · ${explanationReplyCount} explainer repl${explanationReplyCount === 1 ? "y" : "ies"}` : ""}${state.overallComment ? " · overall note" : ""}`;
   currentFileLabelEl.textContent = file.displayPath;
   currentFileMetaEl.textContent = describeFileStatus(file);
 
@@ -335,6 +344,7 @@ function addInlineCommentFromRange(range) {
     startLine,
     endLine,
     body: "",
+    draftBody: "",
     focusRequested: true,
   });
 
@@ -487,15 +497,22 @@ function createCommentCard(comment, options = {}) {
   const header = document.createElement("div");
   header.className = "comment-card-header";
 
+  const heading = document.createElement("div");
+  heading.className = "comment-card-heading";
+
   const title = document.createElement("div");
   title.className = "comment-card-title";
   title.textContent = describeCommentTarget(comment);
+
+  const status = document.createElement("span");
+  status.className = "comment-status";
+
+  heading.append(title, status);
 
   const deleteButton = document.createElement("button");
   deleteButton.type = "button";
   deleteButton.className = "comment-delete";
   deleteButton.textContent = "Delete";
-  deleteButton.disabled = state.busy || state.settled;
   deleteButton.addEventListener("click", () => {
     state.comments = state.comments.filter((item) => item.id !== comment.id);
     renderChrome();
@@ -503,17 +520,50 @@ function createCommentCard(comment, options = {}) {
     refreshInlineComments();
   });
 
-  header.append(title, deleteButton);
+  header.append(heading, deleteButton);
 
   const textarea = document.createElement("textarea");
   textarea.placeholder = "Leave a comment";
-  textarea.value = comment.body ?? "";
-  textarea.disabled = state.busy || state.settled;
+  textarea.value = getCommentDraft(comment);
   textarea.addEventListener("input", () => {
-    comment.body = textarea.value;
+    comment.draftBody = textarea.value;
+    syncCommentCardState();
+    renderChrome();
   });
 
-  card.append(header, textarea);
+  const actions = document.createElement("div");
+  actions.className = "comment-card-actions";
+
+  const hint = document.createElement("div");
+  hint.className = "comment-status-hint";
+
+  const submitCommentButton = document.createElement("button");
+  submitCommentButton.type = "button";
+  submitCommentButton.className = "button button-primary comment-submit";
+  submitCommentButton.addEventListener("click", () => {
+    if (state.busy || state.settled) return;
+    submitCommentDraft(comment);
+    syncCommentCardState();
+    renderChrome();
+  });
+
+  actions.append(hint, submitCommentButton);
+  card.append(header, textarea, actions);
+
+  function syncCommentCardState() {
+    const submissionState = describeCommentSubmissionState(comment);
+    const disabled = state.busy || state.settled;
+
+    status.dataset.tone = submissionState.tone;
+    status.textContent = submissionState.label;
+    hint.textContent = submissionState.hint;
+    textarea.disabled = disabled;
+    deleteButton.disabled = disabled;
+    submitCommentButton.disabled = disabled || submissionState.buttonDisabled;
+    submitCommentButton.textContent = submissionState.buttonLabel;
+  }
+
+  syncCommentCardState();
 
   if (comment.focusRequested === true) {
     comment.focusRequested = false;
@@ -609,6 +659,7 @@ function buildSubmitPayload() {
       }))
       .filter((reply) => reply.body.length > 0),
     comments: state.comments
+      .filter(isCommentSubmitted)
       .map((comment) => ({
         id: comment.id,
         fileId: comment.fileId,
@@ -617,17 +668,26 @@ function buildSubmitPayload() {
         startLine: comment.startLine,
         endLine: comment.endLine,
         body: comment.body.trim(),
-      }))
-      .filter((comment) => comment.body.length > 0),
+      })),
   };
 }
 
 async function submitReview() {
   if (state.busy || state.settled) return;
+
+  const draftCommentCount = state.comments.filter(needsCommentSubmission).length;
+  if (draftCommentCount > 0) {
+    showFlash(`Submit, remove, or delete ${draftCommentCount} pending comment${draftCommentCount === 1 ? "" : "s"} before submitting the review.`, "warning");
+    return;
+  }
+
   state.busy = true;
-  renderChrome();
 
   try {
+    renderChrome();
+    renderFileComments();
+    refreshInlineComments();
+
     const response = await fetch(`/api/submit?token=${encodeURIComponent(token)}`, {
       method: "POST",
       headers: {
@@ -655,9 +715,12 @@ async function submitReview() {
 async function cancelReview() {
   if (state.busy || state.settled) return;
   state.busy = true;
-  renderChrome();
 
   try {
+    renderChrome();
+    renderFileComments();
+    refreshInlineComments();
+
     const response = await fetch(`/api/cancel?token=${encodeURIComponent(token)}`, {
       method: "POST",
     });

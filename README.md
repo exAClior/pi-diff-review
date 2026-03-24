@@ -11,6 +11,7 @@ It keeps the original idea from the session thread, but drops the native window 
 - the active pi model adds read-only hunk explainer notes before the browser opens
 - explainer notes are attached inline in the diff and accept reviewer replies
 - you can add file comments, line comments, and same-side range comments
+- comments stay as drafts until you hit their own Submit button
 - submitting writes a review prompt back into the pi editor
 
 ## Install
