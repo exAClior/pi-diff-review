@@ -9,6 +9,62 @@ import { type ReviewSessionResult } from "./types.js";
 
 type WaitingEditorResult = "escape" | "review-settled";
 
+// V1 keeps the session itself as the review artifact. Send the composed review
+// back as a real user message instead of inventing a parallel persistence path.
+export async function deliverReviewToSession(
+  pi: Pick<ExtensionAPI, "appendEntry" | "sendUserMessage">,
+  ctx: Pick<ExtensionCommandContext, "isIdle" | "model" | "modelRegistry" | "ui">,
+  prompt: string,
+): Promise<"sent" | "queued" | "drafted"> {
+  const reviewMessage = prompt.trim();
+
+  // Keep a session-local backup even if the live handoff to pi later fails.
+  try {
+    pi.appendEntry("diff-review-submission", { prompt: reviewMessage });
+  } catch (error) {
+    const reason = error instanceof Error ? ` (${error.message})` : "";
+    ctx.ui.setEditorText(reviewMessage);
+    ctx.ui.notify(`Pi could not save the diff review to the session${reason}, so it was drafted in the editor instead. Submit it manually to keep it.`, "warning");
+    return "drafted";
+  }
+
+
+  if (!ctx.isIdle()) {
+    pi.sendUserMessage(reviewMessage, { deliverAs: "followUp" });
+    ctx.ui.notify("Saved diff review to the current session and queued it for pi.", "info");
+    return "queued";
+  }
+
+  if (ctx.model == null) {
+    ctx.ui.setEditorText(reviewMessage);
+    ctx.ui.notify("Saved diff review to the current session. No model is selected, so it was also drafted in the editor. Submit it manually to add it to conversation history.", "warning");
+    return "drafted";
+  }
+
+  let apiKey: string | undefined;
+  try {
+    apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
+  } catch (error) {
+    const reason = error instanceof Error ? ` (${error.message})` : "";
+    ctx.ui.setEditorText(reviewMessage);
+    ctx.ui.notify(`Saved diff review to the current session. Pi could not validate the current model${reason}, so it was also drafted in the editor. Submit it manually to add it to conversation history.`, "warning");
+    return "drafted";
+  }
+
+  if (!apiKey) {
+    ctx.ui.setEditorText(reviewMessage);
+    ctx.ui.notify("Saved diff review to the current session. Pi could not authenticate the current model, so it was also drafted in the editor. Submit it manually to add it to conversation history.", "warning");
+    return "drafted";
+  }
+
+  // Pass followUp even when idle. The runtime ignores it when idle, and if the
+  // agent starts streaming between our check and the send, the review still
+  // lands as a queued follow-up instead of failing the handoff.
+  pi.sendUserMessage(reviewMessage, { deliverAs: "followUp" });
+  ctx.ui.notify("Saved diff review to the current session and asked pi to continue from it.", "info");
+  return "sent";
+}
+
 // Open the review URL in the user's default browser without dragging pi into
 // any browser-specific integration details.
 async function openBrowser(url: string): Promise<void> {
@@ -165,8 +221,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const prompt = composeReviewPrompt(filesWithExplanations, message);
-      ctx.ui.setEditorText(prompt);
-      ctx.ui.notify("Inserted diff review feedback into the editor.", "info");
+      await deliverReviewToSession(pi, ctx, prompt);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`Diff review failed: ${message}`, "error");
@@ -177,7 +232,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("diff-review", {
-    description: "Open a browser diff review page and insert review feedback into the editor",
+    description: "Open a browser diff review page and send review feedback into the current session",
     handler: async (_args, ctx) => {
       await reviewDiff(ctx);
     },

@@ -12,7 +12,8 @@ It keeps the original idea from the session thread, but drops the native window 
 - explainer notes are attached inline in the diff and accept reviewer replies
 - you can add file comments, line comments, and same-side range comments
 - comments stay as drafts until you hit their own Submit button
-- submitting writes a review prompt back into the pi editor
+- submitting sends the composed review back as a real user message in the same pi session
+- if pi cannot send immediately because no model/auth is ready, the review falls back to the editor instead of being lost
 
 ## Install
 

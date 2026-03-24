@@ -7,6 +7,7 @@ import {
   needsCommentSubmission,
   submitCommentDraft,
 } from "./comment-submission.js";
+import { hasReviewContent } from "./review-submit.js";
 
 const token = new URL(window.location.href).searchParams.get("token");
 
@@ -131,7 +132,7 @@ overallNoteButton.addEventListener("click", () => {
   if (state.settled || state.busy) return;
   showTextModal({
     title: "Overall review note",
-    description: "This note is prepended above the file and line comments in the generated pi prompt.",
+    description: "This note is prepended above the file and line comments in the review message sent back to pi.",
     initialValue: state.overallComment,
     saveLabel: "Save note",
     onSave(value) {
@@ -468,7 +469,7 @@ function createExplanationCard(explanation, options = {}) {
 
     const replyHint = document.createElement("div");
     replyHint.className = "reply-hint";
-    replyHint.textContent = "Included in the submitted prompt so pi can revise this explanation.";
+    replyHint.textContent = "Included in the submitted review message so pi can revise this explanation.";
 
     const textarea = document.createElement("textarea");
     textarea.className = "explanation-reply";
@@ -681,6 +682,12 @@ async function submitReview() {
     return;
   }
 
+  const payload = buildSubmitPayload();
+  if (!hasReviewContent(payload)) {
+    showFlash("Add an overall note, an explainer reply, or a submitted comment before submitting the review.", "warning");
+    return;
+  }
+
   state.busy = true;
 
   try {
@@ -693,7 +700,7 @@ async function submitReview() {
       headers: {
         "content-type": "application/json",
       },
-      body: JSON.stringify(buildSubmitPayload()),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
