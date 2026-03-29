@@ -6,10 +6,11 @@ It keeps the original idea from the session thread, but drops the native window 
 
 - `/diff-review` collects the current git diff against `HEAD`
 - pi starts a tiny localhost server and opens your browser
-- `@pierre/trees` renders the changed-file tree
+- `@pierre/trees` renders the changed-file tree with explicit review-order numbering
+- the default review sequence in this repo is: config/build → `src/` → `web/` → tests → docs → generated output
 - `@pierre/diffs` renders the active file diff
 - the active pi model adds read-only hunk explainer notes before the browser opens
-- explainer notes are attached inline in the diff and accept reviewer replies
+- explainer notes are summarized per file and attached inline in the diff, with jump links back to the changed lines and reply boxes on the inline notes
 - you can add file comments, line comments, and same-side range comments
 - comments stay as drafts until you hit their own Submit button
 - submitting sends the composed review back as a real user message in the same pi session

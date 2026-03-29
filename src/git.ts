@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { sortFilesForReview } from "./review-order.js";
 import type { ChangeStatus, DiffReviewFile } from "./types.js";
 
 interface ChangedPath {
@@ -172,5 +173,5 @@ export async function getDiffReviewFiles(pi: ExtensionAPI, cwd: string): Promise
     }),
   );
 
-  return { repoRoot, files };
+  return { repoRoot, files: sortFilesForReview(files) };
 }

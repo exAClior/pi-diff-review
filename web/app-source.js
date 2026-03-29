@@ -7,6 +7,8 @@ import {
   needsCommentSubmission,
   submitCommentDraft,
 } from "./comment-submission.js";
+import { highlightInlineExplanation, revealInlineExplanation as revealInlineExplanationCard } from "./inline-explanation.js";
+import { compareReviewTreePaths, createReviewTreePaths } from "./review-tree-order.js";
 import { hasReviewContent } from "./review-submit.js";
 
 const token = new URL(window.location.href).searchParams.get("token");
@@ -43,7 +45,10 @@ const state = {
 };
 
 const filesById = new Map(reviewData.files.map((file) => [file.id, file]));
-const filesByTreePath = new Map(reviewData.files.map((file) => [file.treePath, file]));
+const reviewIndexByFileId = new Map(reviewData.files.map((file, index) => [file.id, index]));
+const reviewTreePaths = createReviewTreePaths(reviewData.files.map((file) => file.treePath));
+const reviewTreePathByFileId = new Map(reviewData.files.map((file, index) => [file.id, reviewTreePaths[index]]));
+const filesByReviewTreePath = new Map(reviewData.files.map((file, index) => [reviewTreePaths[index], file]));
 const explanationsById = new Map(
   reviewData.files.flatMap((file) => (Array.isArray(file.hunkExplanations) ? file.hunkExplanations : []).map((explanation) => [explanation.id, explanation])),
 );
@@ -56,6 +61,7 @@ const totalExplanationCount = reviewData.files.reduce(
 const repoRootEl = document.getElementById("repo-root");
 const summaryEl = document.getElementById("summary");
 const currentFileLabelEl = document.getElementById("current-file-label");
+const currentFileOrderEl = document.getElementById("current-file-order");
 const currentFileMetaEl = document.getElementById("current-file-meta");
 const flashMessageEl = document.getElementById("flash-message");
 const fileCommentsEl = document.getElementById("file-comments");
@@ -70,22 +76,26 @@ repoRootEl.textContent = reviewData.repoRoot;
 
 let flashTimer = null;
 let mountedFileId = null;
+const initialSelectedTreePath = reviewTreePathByFileId.get(state.activeFileId) ?? null;
 
 const fileTree = new FileTree(
   {
-    initialFiles: reviewData.files.map((file) => file.treePath),
-    gitStatus: reviewData.files.map((file) => ({
-      path: file.treePath,
+    initialFiles: reviewTreePaths,
+    sort: {
+      comparator: compareReviewTreePaths,
+    },
+    gitStatus: reviewData.files.map((file, index) => ({
+      path: reviewTreePaths[index],
       status: file.status === "added" ? "added" : file.status === "deleted" ? "deleted" : "modified",
     })),
     flattenEmptyDirectories: true,
   },
   {
-    initialSelectedItems: [activeFile().treePath],
+    initialSelectedItems: initialSelectedTreePath == null ? [] : [initialSelectedTreePath],
     onSelection(items) {
       const nextSelection = items.find((item) => item.isFolder === false);
       if (nextSelection == null) return;
-      const file = filesByTreePath.get(nextSelection.path);
+      const file = filesByReviewTreePath.get(nextSelection.path);
       if (file == null) return;
       setActiveFile(file.id, false);
     },
@@ -237,8 +247,10 @@ function renderChrome() {
   const submittedCommentCount = state.comments.filter(isCommentSubmitted).length;
   const draftCommentCount = state.comments.filter(needsCommentSubmission).length;
   const explanationReplyCount = countCompletedExplanationReplies();
+  const reviewIndex = reviewIndexByFileId.get(file.id) ?? 0;
   summaryEl.textContent = `${reviewData.files.length} file(s) · ${totalExplanationCount} explainer note(s) · ${submittedCommentCount} submitted comment(s)${draftCommentCount > 0 ? ` · ${draftCommentCount} draft comment(s)` : ""}${explanationReplyCount > 0 ? ` · ${explanationReplyCount} explainer repl${explanationReplyCount === 1 ? "y" : "ies"}` : ""}${state.overallComment ? " · overall note" : ""}`;
   currentFileLabelEl.textContent = file.displayPath;
+  currentFileOrderEl.textContent = `Recommended review ${reviewIndex + 1} of ${reviewData.files.length}`;
   currentFileMetaEl.textContent = describeFileStatus(file);
 
   const disabled = state.busy || state.settled;
@@ -259,8 +271,10 @@ function setActiveFile(fileId, syncTree = true) {
   mountActiveFile();
 
   if (syncTree) {
-    const file = activeFile();
-    fileTree.setSelectedItems([file.treePath]);
+    const reviewTreePath = reviewTreePathByFileId.get(fileId);
+    if (reviewTreePath != null) {
+      fileTree.setSelectedItems([reviewTreePath]);
+    }
   }
 }
 
@@ -366,8 +380,11 @@ function renderFileComments() {
   }
 
   if (explanations.length > 0) {
-    fileCommentsEl.appendChild(createNotesSectionLabel("LLM explainer notes"));
-    fileCommentsEl.appendChild(createExplanationHelpCard(explanations.length));
+    fileCommentsEl.appendChild(createNotesSectionLabel("Why this changed"));
+    fileCommentsEl.appendChild(createExplanationOverviewCard(explanations.length));
+    for (const explanation of explanations) {
+      fileCommentsEl.appendChild(createExplanationSummaryCard(explanation));
+    }
   }
 
   if (comments.length > 0) {
@@ -418,19 +435,73 @@ function describeExplanationTarget(explanation) {
   return parts.length > 0 ? parts.join(" · ") : "hunk explanation";
 }
 
-function createExplanationHelpCard(explanationCount) {
+function createExplanationOverviewCard(explanationCount) {
   const card = document.createElement("section");
   card.className = "comment-card explanation-card explanation-help-card";
 
   const title = document.createElement("div");
   title.className = "comment-card-title";
-  title.textContent = "Explainer notes are attached inline in the diff";
+  title.textContent = "Inline reason notes are attached to the diff";
 
   const body = document.createElement("p");
   body.className = "explanation-help-body";
-  body.textContent = `${explanationCount} LLM explainer note(s) are attached below the relevant changed lines. Reply under any note in the diff to correct it or add missing context before you submit.`;
+  body.textContent = `${explanationCount} LLM explainer note(s) summarize the visible intent of the changed hunks. Use “Jump to inline note” to land on the exact modified lines, then reply there if the explanation is wrong or incomplete.`;
 
   card.append(title, body);
+  return card;
+}
+
+function revealInlineExplanation(explanationId) {
+  return revealInlineExplanationCard(diffRootEl, explanationId, {
+    onMissing() {
+      showFlash("Could not find the inline explainer note for this change yet.", "warning");
+    },
+    highlight: highlightInlineExplanation,
+  });
+}
+
+function createExplanationSummaryCard(explanation) {
+  const card = document.createElement("section");
+  card.className = "comment-card explanation-card explanation-summary-card";
+
+  const header = document.createElement("div");
+  header.className = "comment-card-header";
+
+  const heading = document.createElement("div");
+  heading.className = "comment-card-heading";
+
+  const badge = document.createElement("span");
+  badge.className = "explanation-badge";
+  badge.textContent = "LLM explainer";
+
+  const title = document.createElement("div");
+  title.className = "comment-card-title";
+  title.textContent = describeExplanationTarget(explanation);
+
+  heading.append(badge, title);
+  header.append(heading);
+
+  const body = document.createElement("p");
+  body.className = "explanation-body";
+  body.textContent = explanation.body;
+
+  const actions = document.createElement("div");
+  actions.className = "explanation-summary-actions";
+
+  const hint = document.createElement("div");
+  hint.className = "reply-hint";
+  hint.textContent = "This note is also attached inline in the diff at the changed lines.";
+
+  const jumpButton = document.createElement("button");
+  jumpButton.type = "button";
+  jumpButton.className = "button";
+  jumpButton.textContent = "Jump to inline note";
+  jumpButton.addEventListener("click", () => {
+    revealInlineExplanation(explanation.id);
+  });
+
+  actions.append(hint, jumpButton);
+  card.append(header, body, actions);
   return card;
 }
 
@@ -438,6 +509,9 @@ function createExplanationCard(explanation, options = {}) {
   const reply = explanationRepliesByExplanationId.get(explanation.id);
   const card = document.createElement("section");
   card.className = `comment-card explanation-card${options.inline ? " inline-comment" : ""}`;
+  if (options.inline) {
+    card.dataset.inlineExplanationId = explanation.id;
+  }
 
   const header = document.createElement("div");
   header.className = "comment-card-header";
