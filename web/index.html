@@ -5,6 +5,164 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>pi diff review</title>
     <link rel="stylesheet" href="/styles.css" />
+    <style>
+      .diff-mode-toggle {
+        display: inline-flex;
+        align-items: center;
+      }
+
+      .button-segment {
+        border-radius: 0;
+      }
+
+      .button-segment:first-child {
+        border-top-left-radius: 0.5rem;
+        border-bottom-left-radius: 0.5rem;
+      }
+
+      .button-segment:last-child {
+        border-top-right-radius: 0.5rem;
+        border-bottom-right-radius: 0.5rem;
+      }
+
+      .button-segment + .button-segment {
+        margin-left: -1px;
+      }
+
+      .button-segment.is-active {
+        position: relative;
+        z-index: 1;
+        background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+        border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+        color: #f0f6fc;
+      }
+
+      .content-grid {
+        --left-pane-width: 300px;
+        --right-pane-width: 360px;
+        --splitter-size: 10px;
+        grid-template-columns:
+          minmax(220px, var(--left-pane-width))
+          var(--splitter-size)
+          minmax(0, 1fr)
+          var(--splitter-size)
+          minmax(260px, var(--right-pane-width));
+      }
+
+      .sidebar,
+      .diff-pane,
+      .notes-pane {
+        min-height: 0;
+        display: grid;
+      }
+
+      .sidebar {
+        border-right: none;
+      }
+
+      .diff-pane {
+        min-width: 0;
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+
+      .notes-pane {
+        grid-template-rows: auto minmax(0, 1fr);
+        background: color-mix(in srgb, var(--panel) 32%, var(--bg));
+      }
+
+      .sidebar-header,
+      .notes-header {
+        display: grid;
+        gap: 0.25rem;
+        padding: 0.875rem 1rem;
+      }
+
+      .notes-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .pane-splitter {
+        position: relative;
+        min-width: var(--splitter-size);
+        min-height: 0;
+        cursor: col-resize;
+        touch-action: none;
+        background: color-mix(in srgb, var(--panel-alt) 85%, var(--bg));
+      }
+
+      .pane-splitter::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: calc(50% - 1px);
+        width: 2px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--border) 80%, transparent);
+        transition:
+          background 120ms ease,
+          box-shadow 120ms ease;
+      }
+
+      .pane-splitter:hover::after,
+      .pane-splitter[data-dragging="true"]::after {
+        background: color-mix(in srgb, var(--accent) 72%, white 8%);
+        box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.18);
+      }
+
+      .file-comments {
+        min-height: 0;
+        overflow: auto;
+        border-bottom: none;
+        align-content: start;
+      }
+
+      .notes-empty-state {
+        color: var(--muted);
+        font-size: 0.875rem;
+        line-height: 1.5;
+        padding: 0.25rem 0;
+      }
+
+      .is-resizing,
+      .is-resizing * {
+        cursor: col-resize !important;
+        user-select: none;
+      }
+
+      @media (max-width: 860px) {
+        .content-grid {
+          grid-template-columns: 1fr;
+          grid-template-rows: minmax(12rem, 18rem) minmax(30rem, 1fr) minmax(18rem, auto);
+        }
+
+        .pane-splitter {
+          display: none;
+        }
+
+        .sidebar,
+        .diff-pane {
+          border-bottom: 1px solid var(--border);
+        }
+
+        .notes-pane {
+          grid-template-rows: auto auto;
+        }
+
+        .diff-root {
+          min-height: 18rem;
+        }
+
+        .file-comments {
+          min-height: 0;
+          overflow: visible;
+        }
+      }
+    </style>
   </head>
   <body>
     <div class="app-shell">
@@ -17,6 +175,10 @@
           <p id="repo-root" class="repo-root"></p>
         </div>
         <div class="topbar-actions">
+          <div class="diff-mode-toggle" role="group" aria-label="Diff layout mode">
+            <button id="diff-mode-column-button" type="button" class="button button-segment">Column</button>
+            <button id="diff-mode-stacked-button" type="button" class="button button-segment">Stacked</button>
+          </div>
           <div id="summary" class="summary"></div>
           <button id="overall-note-button" type="button" class="button">Overall note</button>
           <button id="cancel-button" type="button" class="button">Cancel</button>
@@ -24,7 +186,7 @@
         </div>
       </header>
 
-      <div class="content-grid">
+      <div id="content-grid" class="content-grid">
         <aside class="sidebar">
           <div class="sidebar-header">
             <div class="sidebar-title">Changed files</div>
@@ -33,19 +195,43 @@
           <div id="file-tree" class="tree-mount"></div>
         </aside>
 
-        <main class="main-pane">
-          <div class="main-header">
+        <div
+          id="left-pane-splitter"
+          class="pane-splitter"
+          role="presentation"
+          aria-hidden="true"
+        ></div>
+
+        <main class="diff-pane">
+          <div class="main-header diff-header">
             <div>
               <div id="current-file-label" class="current-file-label"></div>
               <div id="current-file-order" class="current-file-order"></div>
               <div id="current-file-meta" class="current-file-meta"></div>
             </div>
+          </div>
+
+          <div id="diff-root" class="diff-root"></div>
+        </main>
+
+        <div
+          id="right-pane-splitter"
+          class="pane-splitter"
+          role="presentation"
+          aria-hidden="true"
+        ></div>
+
+        <aside class="notes-pane">
+          <div class="notes-header">
+            <div>
+              <div class="sidebar-title">Current file notes</div>
+              <div id="notes-pane-meta" class="sidebar-subtitle"></div>
+            </div>
             <button id="file-comment-button" type="button" class="button">Add file comment</button>
           </div>
 
-          <section id="file-comments" class="file-comments" hidden></section>
-          <div id="diff-root" class="diff-root"></div>
-        </main>
+          <section id="file-comments" class="file-comments"></section>
+        </aside>
       </div>
     </div>
 

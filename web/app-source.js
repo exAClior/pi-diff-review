@@ -8,6 +8,7 @@ import {
   submitCommentDraft,
 } from "./comment-submission.js";
 import { highlightInlineExplanation, revealInlineExplanation as revealInlineExplanationCard } from "./inline-explanation.js";
+import { createLayoutControls } from "./layout-controls.js";
 import { compareReviewTreePaths, createReviewTreePaths } from "./review-tree-order.js";
 import { hasReviewContent } from "./review-submit.js";
 
@@ -60,9 +61,13 @@ const totalExplanationCount = reviewData.files.reduce(
 
 const repoRootEl = document.getElementById("repo-root");
 const summaryEl = document.getElementById("summary");
+const contentGridEl = document.getElementById("content-grid");
+const leftPaneSplitterEl = document.getElementById("left-pane-splitter");
+const rightPaneSplitterEl = document.getElementById("right-pane-splitter");
 const currentFileLabelEl = document.getElementById("current-file-label");
 const currentFileOrderEl = document.getElementById("current-file-order");
 const currentFileMetaEl = document.getElementById("current-file-meta");
+const notesPaneMetaEl = document.getElementById("notes-pane-meta");
 const flashMessageEl = document.getElementById("flash-message");
 const fileCommentsEl = document.getElementById("file-comments");
 const diffRootEl = document.getElementById("diff-root");
@@ -70,6 +75,8 @@ const modalRootEl = document.getElementById("modal-root");
 const submitButton = document.getElementById("submit-button");
 const cancelButton = document.getElementById("cancel-button");
 const overallNoteButton = document.getElementById("overall-note-button");
+const diffModeColumnButton = document.getElementById("diff-mode-column-button");
+const diffModeStackedButton = document.getElementById("diff-mode-stacked-button");
 const fileCommentButton = document.getElementById("file-comment-button");
 
 repoRootEl.textContent = reviewData.repoRoot;
@@ -127,6 +134,21 @@ const diff = new FileDiff({
       return document.createElement("div");
     }
     return createCommentCard(comment, { inline: true });
+  },
+});
+
+createLayoutControls({
+  shell: contentGridEl,
+  leftSplitter: leftPaneSplitterEl,
+  rightSplitter: rightPaneSplitterEl,
+  columnButton: diffModeColumnButton,
+  stackedButton: diffModeStackedButton,
+  onDiffModeChange(diffStyle) {
+    diff.setOptions({
+      ...diff.options,
+      diffStyle,
+    });
+    diff.rerender();
   },
 });
 
@@ -266,6 +288,10 @@ function setActiveFile(fileId, syncTree = true) {
   }
 
   state.activeFileId = fileId;
+  diffRootEl.scrollTop = 0;
+  diffRootEl.scrollLeft = 0;
+  fileCommentsEl.scrollTop = 0;
+  fileCommentsEl.scrollLeft = 0;
   renderChrome();
   renderFileComments();
   mountActiveFile();
@@ -374,10 +400,7 @@ function renderFileComments() {
   const comments = state.comments.filter((comment) => comment.fileId === file.id && comment.kind === "file");
 
   fileCommentsEl.innerHTML = "";
-  fileCommentsEl.hidden = explanations.length === 0 && comments.length === 0;
-  if (fileCommentsEl.hidden) {
-    return;
-  }
+  notesPaneMetaEl.textContent = `${explanations.length} explainer note${explanations.length === 1 ? "" : "s"}${comments.length > 0 ? ` · ${comments.length} file comment${comments.length === 1 ? "" : "s"}` : ""}`;
 
   if (explanations.length > 0) {
     fileCommentsEl.appendChild(createNotesSectionLabel("Why this changed"));
@@ -392,6 +415,10 @@ function renderFileComments() {
     for (const comment of comments) {
       fileCommentsEl.appendChild(createCommentCard(comment));
     }
+  }
+
+  if (explanations.length === 0 && comments.length === 0) {
+    fileCommentsEl.appendChild(createEmptyNotesState());
   }
 }
 
@@ -412,6 +439,13 @@ function createNotesSectionLabel(text) {
   label.className = "notes-section-label";
   label.textContent = text;
   return label;
+}
+
+function createEmptyNotesState() {
+  const emptyState = document.createElement("div");
+  emptyState.className = "notes-empty-state";
+  emptyState.textContent = "No explainer notes or file comments for this file yet.";
+  return emptyState;
 }
 
 function formatExplanationRange(label, startLine, endLine) {
