@@ -7,6 +7,13 @@ import {
   needsCommentSubmission,
   submitCommentDraft,
 } from "./comment-submission.js";
+import {
+  describeExplanationReplySubmissionState,
+  getExplanationReplyDraft,
+  isExplanationReplySubmitted,
+  needsExplanationReplySubmission,
+  submitExplanationReplyDraft,
+} from "./explanation-reply-submission.js";
 import { highlightInlineExplanation, revealInlineExplanation as revealInlineExplanationCard } from "./inline-explanation.js";
 import { createLayoutControls } from "./layout-controls.js";
 import { compareReviewTreePaths, createReviewTreePaths } from "./review-tree-order.js";
@@ -39,6 +46,7 @@ const state = {
       id: `${explanation.id}:reply`,
       explanationId: explanation.id,
       body: "",
+      draftBody: "",
     })),
   ),
   busy: false,
@@ -260,17 +268,18 @@ function describeFileStatus(file) {
   return "Click or drag in the gutter to add line or range comments on one side of the diff.";
 }
 
-function countCompletedExplanationReplies() {
-  return state.explanationReplies.reduce((count, reply) => count + (reply.body.trim().length > 0 ? 1 : 0), 0);
+function countSubmittedExplanationReplies() {
+  return state.explanationReplies.filter(isExplanationReplySubmitted).length;
 }
 
 function renderChrome() {
   const file = activeFile();
   const submittedCommentCount = state.comments.filter(isCommentSubmitted).length;
   const draftCommentCount = state.comments.filter(needsCommentSubmission).length;
-  const explanationReplyCount = countCompletedExplanationReplies();
+  const submittedExplanationReplyCount = countSubmittedExplanationReplies();
+  const draftExplanationReplyCount = state.explanationReplies.filter(needsExplanationReplySubmission).length;
   const reviewIndex = reviewIndexByFileId.get(file.id) ?? 0;
-  summaryEl.textContent = `${reviewData.files.length} file(s) · ${totalExplanationCount} explainer note(s) · ${submittedCommentCount} submitted comment(s)${draftCommentCount > 0 ? ` · ${draftCommentCount} draft comment(s)` : ""}${explanationReplyCount > 0 ? ` · ${explanationReplyCount} explainer repl${explanationReplyCount === 1 ? "y" : "ies"}` : ""}${state.overallComment ? " · overall note" : ""}`;
+  summaryEl.textContent = `${reviewData.files.length} file(s) · ${totalExplanationCount} explainer note(s) · ${submittedCommentCount} submitted comment(s)${draftCommentCount > 0 ? ` · ${draftCommentCount} draft comment(s)` : ""}${submittedExplanationReplyCount > 0 ? ` · ${submittedExplanationReplyCount} submitted explainer repl${submittedExplanationReplyCount === 1 ? "y" : "ies"}` : ""}${draftExplanationReplyCount > 0 ? ` · ${draftExplanationReplyCount} draft explainer repl${draftExplanationReplyCount === 1 ? "y" : "ies"}` : ""}${state.overallComment ? " · overall note" : ""}`;
   currentFileLabelEl.textContent = file.displayPath;
   currentFileOrderEl.textContent = `Recommended review ${reviewIndex + 1} of ${reviewData.files.length}`;
   currentFileMetaEl.textContent = describeFileStatus(file);
@@ -561,7 +570,10 @@ function createExplanationCard(explanation, options = {}) {
   title.className = "comment-card-title";
   title.textContent = describeExplanationTarget(explanation);
 
-  heading.append(badge, title);
+  const status = document.createElement("span");
+  status.className = "comment-status";
+
+  heading.append(badge, title, status);
   header.append(heading);
 
   const body = document.createElement("p");
@@ -577,23 +589,49 @@ function createExplanationCard(explanation, options = {}) {
 
     const replyHint = document.createElement("div");
     replyHint.className = "reply-hint";
-    replyHint.textContent = "Included in the submitted review message so pi can revise this explanation.";
 
     const textarea = document.createElement("textarea");
     textarea.className = "explanation-reply";
     textarea.placeholder = "Tell pi what this explanation got wrong, missed, or should emphasize.";
-    textarea.value = reply.body;
-    textarea.disabled = state.busy || state.settled;
+    textarea.value = getExplanationReplyDraft(reply);
     textarea.addEventListener("input", () => {
-      const hadReply = reply.body.trim().length > 0;
-      reply.body = textarea.value;
-      const hasReply = reply.body.trim().length > 0;
-      if (hadReply !== hasReply) {
-        renderChrome();
-      }
+      reply.draftBody = textarea.value;
+      syncExplanationReplyCardState();
+      renderChrome();
     });
 
-    card.append(replyLabel, replyHint, textarea);
+    const actions = document.createElement("div");
+    actions.className = "comment-card-actions";
+
+    const submitReplyButton = document.createElement("button");
+    submitReplyButton.type = "button";
+    submitReplyButton.className = "button button-primary comment-submit";
+    submitReplyButton.addEventListener("click", () => {
+      if (state.busy || state.settled) return;
+      submitExplanationReplyDraft(reply);
+      syncExplanationReplyCardState();
+      renderChrome();
+    });
+
+    actions.append(replyHint, submitReplyButton);
+    card.append(replyLabel, textarea, actions);
+
+    function syncExplanationReplyCardState() {
+      const submissionState = describeExplanationReplySubmissionState(reply);
+      const disabled = state.busy || state.settled;
+
+      status.dataset.tone = submissionState.tone;
+      status.textContent = submissionState.label;
+      replyHint.textContent = submissionState.hint;
+      textarea.disabled = disabled;
+      submitReplyButton.disabled = disabled || submissionState.buttonDisabled;
+      submitReplyButton.textContent = submissionState.buttonLabel;
+    }
+
+    syncExplanationReplyCardState();
+  } else {
+    status.dataset.tone = "submitted";
+    status.textContent = "Submitted";
   }
 
   return card;
@@ -761,12 +799,12 @@ function buildSubmitPayload() {
     type: "submit",
     overallComment: state.overallComment.trim(),
     explanationReplies: state.explanationReplies
+      .filter(isExplanationReplySubmitted)
       .map((reply) => ({
         id: reply.id,
         explanationId: reply.explanationId,
         body: reply.body.trim(),
-      }))
-      .filter((reply) => reply.body.length > 0),
+      })),
     comments: state.comments
       .filter(isCommentSubmitted)
       .map((comment) => ({
@@ -785,8 +823,16 @@ async function submitReview() {
   if (state.busy || state.settled) return;
 
   const draftCommentCount = state.comments.filter(needsCommentSubmission).length;
-  if (draftCommentCount > 0) {
-    showFlash(`Submit, remove, or delete ${draftCommentCount} pending comment${draftCommentCount === 1 ? "" : "s"} before submitting the review.`, "warning");
+  const draftExplanationReplyCount = state.explanationReplies.filter(needsExplanationReplySubmission).length;
+  if (draftCommentCount > 0 || draftExplanationReplyCount > 0) {
+    const pendingItems = [];
+    if (draftExplanationReplyCount > 0) {
+      pendingItems.push(`${draftExplanationReplyCount} explainer repl${draftExplanationReplyCount === 1 ? "y" : "ies"}`);
+    }
+    if (draftCommentCount > 0) {
+      pendingItems.push(`${draftCommentCount} comment${draftCommentCount === 1 ? "" : "s"}`);
+    }
+    showFlash(`Submit or clear ${pendingItems.join(" and ")} before submitting the review.`, "warning");
     return;
   }
 
