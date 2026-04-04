@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildCompletedExplanationStatus, normalizeUnifiedPatchHeaders, parseHunkExplanationResponse, parseHunkExplanationsFromAssistantMessage, parseUnifiedDiffHunks } from "../src/explain.js";
+import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { addHunkExplanations, buildCompletedExplanationStatus, normalizeUnifiedPatchHeaders, parseHunkExplanationResponse, parseHunkExplanationsFromAssistantMessage, parseUnifiedDiffHunks } from "../src/explain.js";
+import type { DiffReviewFile } from "../src/types.js";
 
 test("parseUnifiedDiffHunks captures hunk anchors and line ranges", () => {
   const diffText = [
@@ -113,6 +115,56 @@ test("normalizeUnifiedPatchHeaders removes temp file paths from no-index diffs",
   assert.match(normalized, /^diff --git a\/src\/example\.ts b\/src\/example\.ts/m);
   assert.match(normalized, /^--- a\/src\/example\.ts$/m);
   assert.match(normalized, /^\+\+\+ b\/src\/example\.ts$/m);
+});
+
+test("addHunkExplanations skips cleanly when auth resolves headers without an api key", async () => {
+  const notifications: Array<{ message: string; tone: string }> = [];
+  const files: DiffReviewFile[] = [
+    {
+      id: "file-1",
+      status: "modified",
+      oldPath: "src/example.ts",
+      newPath: "src/example.ts",
+      displayPath: "src/example.ts",
+      treePath: "src/example.ts",
+      oldContent: "const value = 1;\n",
+      newContent: "const value = 2;\n",
+      hunkExplanations: [],
+    },
+  ];
+
+  const result = await addHunkExplanations(
+    {} as ExtensionAPI,
+    {
+      model: { provider: "openai", id: "gpt-5" },
+      modelRegistry: {
+        async getApiKeyAndHeaders() {
+          return {
+            ok: true,
+            headers: { Authorization: "Bearer oauth-token" },
+          };
+        },
+      },
+      ui: {
+        notify(message: string, tone: string) {
+          notifications.push({ message, tone });
+        },
+      },
+    } as unknown as ExtensionCommandContext,
+    process.cwd(),
+    files,
+  );
+
+  assert.deepEqual(result.files, files);
+  assert.deepEqual(notifications, []);
+  assert.deepEqual(result.status, {
+    state: "skipped-no-auth",
+    attempted: false,
+    modelLabel: "openai/gpt-5",
+    generatedCount: 0,
+    summary: 'No API key or OAuth access was available for openai/gpt-5, so LLM explainer notes were skipped (No API key found for "openai").',
+    fileStatuses: [],
+  });
 });
 
 test("parseHunkExplanationsFromAssistantMessage accepts tool-call arguments when text is empty", () => {

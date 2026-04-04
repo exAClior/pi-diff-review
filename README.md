@@ -22,10 +22,12 @@ It keeps the original idea from the session thread, but drops the native window 
 pi install git:https://github.com/badlogic/pi-diff-review
 ```
 
+This package now targets `pi` `0.65.0` or newer.
+
 ## Requirements
 
 - Node.js 20+
-- `pi` installed
+- `pi` `0.65.0+`
 - a modern browser
 
 ## Development

@@ -15,7 +15,7 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@mariozechner/pi-coding-agent": "^0.65.0"
   },
   "devDependencies": {
     "@pierre/diffs": "^1.1.3",
@@ -30,6 +30,6 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
-    "@mariozechner/pi-ai": "^0.57.1"
+    "@mariozechner/pi-ai": "^0.65.0"
   }
 }

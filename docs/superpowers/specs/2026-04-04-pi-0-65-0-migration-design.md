@@ -7,14 +7,14 @@ Repo: `pi-diff-review`
 
 Pi `0.65.0` introduces several SDK and extension changes, but this repo only appears to touch a narrow part of that surface. Evidence: a repo-wide search in `src/`, `README.md`, and `package.json` found no uses of removed extension events such as `session_switch` or `session_fork`, no uses of removed session-replacement methods such as `newSession()` or `switchSession()` on `AgentSession`, and no uses of `session_directory`.
 
-The one concrete changelog-aligned pattern in this repo is a standalone custom tool definition in [`src/explain.ts`](file:///Users/exaclior/coding_agents/pi-diff-review/src/explain.ts). That file currently defines `EXPLANATION_TOOL` as a manually widened `Tool` object imported from `@mariozechner/pi-ai`.
+The repo's local package versions were still on `0.57.1`. Evidence: before migration, both the installed `@mariozechner/pi-ai` and `@mariozechner/pi-coding-agent` packages resolved to `0.57.1`, and [`package.json`](file:///Users/exaclior/coding_agents/pi-diff-review/package.json) declared `@mariozechner/pi-ai` `^0.57.1` with an unconstrained `@mariozechner/pi-coding-agent` peer.
 
-Pi `0.65.0` adds `defineTool()` specifically to preserve TypeScript parameter inference for standalone custom tool definitions without manual casts. Evidence: upstream docs in `pi-mono` describe `defineTool()` in `packages/coding-agent/docs/extensions.md`, and the helper is exported from `packages/coding-agent/src/core/extensions/types.ts`.
+During implementation review against upstream source, the earlier `defineTool()` idea proved to be the wrong API boundary for this repo. Evidence: `defineTool()` in `pi-mono` applies to extension `ToolDefinition` objects in `packages/coding-agent/src/core/extensions/types.ts`, while [`src/explain.ts`](file:///Users/exaclior/coding_agents/pi-diff-review/src/explain.ts) uses a plain `Tool` schema from `@mariozechner/pi-ai` and passes it directly to `complete(...)`. That means the correct repo-level `0.65.0` migration is package and compatibility alignment, not a forced tool-definition rewrite.
 
 ## Goals
 
 - Update this repo to align with the relevant `0.65.0` extension API surface.
-- Adopt `defineTool()` where this repo currently uses the exact standalone-tool pattern it was added to improve.
+- Move the local Pi package floor from `0.57.1` to `0.65.0`.
 - Keep the migration intentionally small and grounded in actual local usage rather than the full upstream changelog.
 - Verify the change with the repo's existing typecheck and test commands.
 
@@ -29,11 +29,12 @@ Pi `0.65.0` adds `defineTool()` specifically to preserve TypeScript parameter in
 
 Use a selective modernization pass:
 
-- migrate the standalone explainer tool in [`src/explain.ts`](file:///Users/exaclior/coding_agents/pi-diff-review/src/explain.ts) to `defineTool()`
+- update the Pi package versions and peer floor in [`package.json`](file:///Users/exaclior/coding_agents/pi-diff-review/package.json)
+- refresh the lockfile by installing the `0.65.0` packages locally
 - keep the explanation-generation flow and review delivery logic unchanged unless verification reveals a real incompatibility
-- update package or README wording only where it improves clarity about current Pi compatibility
+- update README wording where it improves clarity about the new minimum supported Pi version
 
-Reasoning: this is the smallest change that captures the one clearly applicable `0.65.0` improvement without introducing speculative runtime churn.
+Reasoning: this is the smallest change that puts the repo on the intended Pi release without introducing speculative runtime churn or rewriting code that already typechecks and tests cleanly against `0.65.0`.
 
 ## Architecture
 
@@ -43,23 +44,25 @@ Keep the current extension structure intact:
 - [`src/server.ts`](file:///Users/exaclior/coding_agents/pi-diff-review/src/server.ts) remains the localhost browser-review server
 - [`src/explain.ts`](file:///Users/exaclior/coding_agents/pi-diff-review/src/explain.ts) remains the hunk-explanation module
 
-The only architecture-level API change is replacing the standalone `Tool` annotation in [`src/explain.ts`](file:///Users/exaclior/coding_agents/pi-diff-review/src/explain.ts) with `defineTool(...)` from `@mariozechner/pi-coding-agent`.
+No architecture-level source changes are required if the repo still typechecks and tests cleanly after the package upgrade.
 
-Reasoning: `defineTool()` improves type inference for standalone tool definitions, but it does not require a different runtime model or a different completion API. The `complete(...)` call from `@mariozechner/pi-ai` should remain unchanged because tool execution semantics are not changing.
+Reasoning: the extension does not own session-runtime creation, and the only candidate source migration that initially looked relevant (`defineTool()`) turned out to target a different tool abstraction than the one this repo uses.
 
 ## Behavior Changes
 
-### Tool Definition
+### Package Alignment
 
 Replace:
 
-- a manually typed `Tool` object used as `EXPLANATION_TOOL`
+- `@mariozechner/pi-ai` `^0.57.1`
+- unconstrained `@mariozechner/pi-coding-agent` peer dependency
 
 With:
 
-- a `defineTool(...)` declaration whose schema and `execute` signature remain inferred from the declared parameters
+- `@mariozechner/pi-ai` `^0.65.0`
+- `@mariozechner/pi-coding-agent` peer dependency `^0.65.0`
 
-Reasoning: this is the exact migration target described by the upstream changelog item for `defineTool()`.
+Reasoning: once the repo is declared and verified against Pi `0.65.0`, the package metadata should enforce that minimum supported version instead of silently allowing older hosts.
 
 ### Explanation Flow
 
@@ -95,10 +98,11 @@ for any wording that now undersells or misstates compatibility with the current 
 
 Likely actions:
 
-- keep the existing loose peer dependency on `@mariozechner/pi-coding-agent` unless verification shows a stricter version floor is necessary
-- mention `0.65.0` compatibility in the README only if that improves clarity and does not create unnecessary maintenance overhead
+- set the `@mariozechner/pi-coding-agent` peer dependency floor to `^0.65.0`
+- update `@mariozechner/pi-ai` to `^0.65.0`
+- mention `0.65.0+` compatibility in the README so install requirements match the package metadata
 
-Reasoning: upstream package metadata shows both `@mariozechner/pi-coding-agent` and `@mariozechner/pi-ai` publish `0.65.0`, but the repo should avoid pinning more tightly than needed unless a concrete compatibility reason appears during verification.
+Reasoning: after successful verification on `0.65.0`, the repo should declare that floor explicitly instead of leaving compatibility ambiguous.
 
 ## Verification
 
@@ -109,7 +113,7 @@ Primary verification should use the commands already declared in [`package.json`
 
 Success criteria:
 
-- the explainer tool still typechecks after migration to `defineTool()`
+- the repo typechecks against `@mariozechner/pi-ai` and `@mariozechner/pi-coding-agent` `0.65.0`
 - existing tests continue to pass
 - no new runtime behavior changes are introduced in the review flow
 
@@ -118,15 +122,15 @@ Reasoning: the migration target is mostly type-surface alignment, so the highest
 ## Risks
 
 - Local unrelated edits already exist in [`src/explain.ts`](file:///Users/exaclior/coding_agents/pi-diff-review/src/explain.ts), [`src/index.ts`](file:///Users/exaclior/coding_agents/pi-diff-review/src/index.ts), [`test/index.test.ts`](file:///Users/exaclior/coding_agents/pi-diff-review/test/index.test.ts), and an untracked [`src/model-auth.ts`](file:///Users/exaclior/coding_agents/pi-diff-review/src/model-auth.ts). Reasoning: `git status --short` showed them, so the migration must stay narrowly scoped and avoid overwriting concurrent work.
-- `defineTool()` may require a small import reshuffle between `@mariozechner/pi-ai` and `@mariozechner/pi-coding-agent`. Reasoning: the current tool type lives in the AI package, while the new helper lives in the coding-agent package.
+- Upgrading from `0.57.1` to `0.65.0` could reveal hidden source incompatibilities during typecheck or tests. Reasoning: even when the repo does not obviously use changed APIs, version jumps can surface renamed types or stricter signatures.
 - README changes can create accidental version promises if written too strongly. Reasoning: compatibility claims should match what was actually verified in this repo.
 
 ## Implementation Summary
 
 The intended implementation should stay within:
 
-- [`src/explain.ts`](file:///Users/exaclior/coding_agents/pi-diff-review/src/explain.ts) for the `defineTool()` migration
+- [`package.json`](file:///Users/exaclior/coding_agents/pi-diff-review/package.json) for the Pi version floor
+- [`package-lock.json`](file:///Users/exaclior/coding_agents/pi-diff-review/package-lock.json) for the resolved dependency update
 - optionally [`README.md`](file:///Users/exaclior/coding_agents/pi-diff-review/README.md) for a small compatibility note
-- optionally [`package.json`](file:///Users/exaclior/coding_agents/pi-diff-review/package.json) if verification shows a package-level adjustment is warranted
 
-No session-runtime refactor, extension event migration, or diagnostics subsystem work is planned unless implementation evidence proves it necessary.
+No session-runtime refactor, extension event migration, diagnostics subsystem work, or `defineTool()` rewrite is planned unless implementation evidence proves it necessary.

@@ -11,6 +11,7 @@ import type {
   HunkExplanation,
   ReviewCommentSide,
 } from "./types.js";
+import { getModelCompletionAuth } from "./model-auth.js";
 
 interface DiffHunkSeed {
   fileId: string;
@@ -491,8 +492,8 @@ export async function addHunkExplanations(
   }
 
   const modelLabel = `${model.provider}/${model.id}`;
-  const apiKey = await ctx.modelRegistry.getApiKey(model);
-  if (apiKey == null) {
+  const auth = await getModelCompletionAuth(ctx.modelRegistry, model);
+  if (!auth.ok) {
     return {
       files,
       status: {
@@ -500,7 +501,7 @@ export async function addHunkExplanations(
         attempted: false,
         modelLabel,
         generatedCount: 0,
-        summary: `No API key or OAuth access was available for ${modelLabel}, so LLM explainer notes were skipped.`,
+        summary: `No API key or OAuth access was available for ${modelLabel}, so LLM explainer notes were skipped (${auth.error}).`,
         fileStatuses: [],
       },
     };
@@ -545,7 +546,8 @@ export async function addHunkExplanations(
           tools: [EXPLANATION_TOOL],
         },
         {
-          apiKey,
+          apiKey: auth.apiKey,
+          headers: auth.headers,
           maxTokens: Math.min(4096, 512 + hunks.length * 192),
         },
       );

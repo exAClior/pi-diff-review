@@ -3,12 +3,27 @@ import test from "node:test";
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { deliverReviewToSession } from "../src/index.js";
 
+type RequestAuth =
+  | {
+      ok: true;
+      apiKey?: string;
+      headers?: Record<string, string>;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
 function createHarness(options: {
   isIdle: boolean;
   model?: object;
+  hasConfiguredAuth?: boolean;
   apiKey?: string;
   appendEntryError?: Error;
   getApiKey?: () => Promise<string | undefined>;
+  authResult?: RequestAuth;
+  getApiKeyAndHeaders?: () => Promise<RequestAuth>;
+  includeLegacyGetApiKey?: boolean;
 }) {
   const sentMessages: Array<{ content: string; options?: { deliverAs?: "steer" | "followUp" } }> = [];
   const appendedEntries: Array<{ customType: string; data: unknown }> = [];
@@ -33,9 +48,38 @@ function createHarness(options: {
       return options.isIdle;
     },
     modelRegistry: {
-      async getApiKey() {
-        return options.getApiKey != null ? options.getApiKey() : options.apiKey;
+      async getApiKeyAndHeaders() {
+        if (options.getApiKeyAndHeaders != null) {
+          return options.getApiKeyAndHeaders();
+        }
+
+        if (options.authResult != null) {
+          return options.authResult;
+        }
+
+        return {
+          ok: true,
+          apiKey: options.getApiKey != null ? await options.getApiKey() : options.apiKey,
+        } satisfies RequestAuth;
       },
+      hasConfiguredAuth() {
+        if (options.hasConfiguredAuth != null) {
+          return options.hasConfiguredAuth;
+        }
+
+        if (options.authResult != null) {
+          return options.authResult.ok && options.authResult.apiKey != null;
+        }
+
+        return options.apiKey != null;
+      },
+      ...(options.includeLegacyGetApiKey === false
+        ? {}
+        : {
+            async getApiKey() {
+              return options.getApiKey != null ? options.getApiKey() : options.apiKey;
+            },
+          }),
     },
     ui: {
       notify(message: string, tone: string) {
@@ -54,7 +98,7 @@ test("deliverReviewToSession sends the review as a real same-session message whe
   const { pi, ctx, sentMessages, appendedEntries, notifications, editorTexts } = createHarness({
     isIdle: true,
     model: { provider: "openai", id: "gpt-5" },
-    apiKey: "secret",
+    authResult: { ok: true, apiKey: "secret" },
   });
 
   const result = await deliverReviewToSession(pi, ctx, "\nPlease address the following feedback\n\n1. src/example.ts\n   Rename this variable.\n");
@@ -119,7 +163,7 @@ test("deliverReviewToSession falls back to the editor when the session backup wr
   const { pi, ctx, sentMessages, appendedEntries, notifications, editorTexts } = createHarness({
     isIdle: true,
     model: { provider: "openai", id: "gpt-5" },
-    apiKey: "secret",
+    authResult: { ok: true, apiKey: "secret" },
     appendEntryError: new Error("disk full"),
   });
 
@@ -168,7 +212,7 @@ test("deliverReviewToSession falls back to the editor when the current model is 
   const { pi, ctx, sentMessages, appendedEntries, notifications, editorTexts } = createHarness({
     isIdle: true,
     model: { provider: "openai", id: "gpt-5" },
-    apiKey: undefined,
+    authResult: { ok: false, error: "No API key found for \"openai\"" },
   });
 
   const result = await deliverReviewToSession(pi, ctx, "Please address the following feedback");
@@ -187,7 +231,7 @@ test("deliverReviewToSession falls back to the editor when the current model is 
   assert.deepEqual(notifications, [
     {
       message:
-        "Saved diff review to the current session. Pi could not authenticate the current model, so it was also drafted in the editor. Submit it manually to add it to conversation history.",
+        'Saved diff review to the current session. Pi could not validate the current model (No API key found for "openai"), so it was also drafted in the editor. Submit it manually to add it to conversation history.',
       tone: "warning",
     },
   ]);
@@ -197,7 +241,8 @@ test("deliverReviewToSession falls back to the editor when api-key lookup fails"
   const { pi, ctx, sentMessages, appendedEntries, notifications, editorTexts } = createHarness({
     isIdle: true,
     model: { provider: "openai", id: "gpt-5" },
-    getApiKey: async () => {
+    hasConfiguredAuth: true,
+    getApiKeyAndHeaders: async () => {
       throw new Error("lookup failed");
     },
   });
@@ -220,6 +265,73 @@ test("deliverReviewToSession falls back to the editor when api-key lookup fails"
       message:
         "Saved diff review to the current session. Pi could not validate the current model (lookup failed), so it was also drafted in the editor. Submit it manually to add it to conversation history.",
       tone: "warning",
+    },
+  ]);
+});
+
+test("deliverReviewToSession falls back to the editor when modern auth only resolves headers", async () => {
+  const { pi, ctx, sentMessages, appendedEntries, notifications, editorTexts } = createHarness({
+    isIdle: true,
+    model: { provider: "openai", id: "gpt-5" },
+    authResult: { ok: true, headers: { Authorization: "Bearer oauth-token" } },
+    hasConfiguredAuth: false,
+  });
+
+  const result = await deliverReviewToSession(pi, ctx, "Please address the following feedback");
+
+  assert.equal(result, "drafted");
+  assert.deepEqual(appendedEntries, [
+    {
+      customType: "diff-review-submission",
+      data: {
+        prompt: "Please address the following feedback",
+      },
+    },
+  ]);
+  assert.deepEqual(sentMessages, []);
+  assert.deepEqual(editorTexts, ["Please address the following feedback"]);
+  assert.deepEqual(notifications, [
+    {
+      message:
+        'Saved diff review to the current session. Pi could not validate the current model (No API key found for "openai"), so it was also drafted in the editor. Submit it manually to add it to conversation history.',
+      tone: "warning",
+    },
+  ]);
+});
+
+test("deliverReviewToSession falls back to legacy getApiKey registries", async () => {
+  const { pi, ctx, sentMessages, appendedEntries, notifications, editorTexts } = createHarness({
+    isIdle: true,
+    model: { provider: "openai", id: "gpt-5" },
+    apiKey: "legacy-secret",
+    includeLegacyGetApiKey: true,
+    getApiKeyAndHeaders: undefined,
+  });
+
+  delete (ctx.modelRegistry as { getApiKeyAndHeaders?: unknown }).getApiKeyAndHeaders;
+
+  const result = await deliverReviewToSession(pi, ctx, "Please address the following feedback");
+
+  assert.equal(result, "sent");
+  assert.deepEqual(appendedEntries, [
+    {
+      customType: "diff-review-submission",
+      data: {
+        prompt: "Please address the following feedback",
+      },
+    },
+  ]);
+  assert.deepEqual(sentMessages, [
+    {
+      content: "Please address the following feedback",
+      options: { deliverAs: "followUp" },
+    },
+  ]);
+  assert.deepEqual(editorTexts, []);
+  assert.deepEqual(notifications, [
+    {
+      message: "Saved diff review to the current session and asked pi to continue from it.",
+      tone: "info",
     },
   ]);
 });

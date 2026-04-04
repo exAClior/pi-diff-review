@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-cod
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { addHunkExplanations } from "./explain.js";
 import { getDiffReviewFiles } from "./git.js";
+import { getModelIdleSessionAuth } from "./model-auth.js";
 import { composeReviewPrompt } from "./prompt.js";
 import { startReviewServer, type ReviewServerSession } from "./server.js";
 import { type ReviewSessionResult } from "./types.js";
@@ -41,19 +42,11 @@ export async function deliverReviewToSession(
     return "drafted";
   }
 
-  let apiKey: string | undefined;
-  try {
-    apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
-  } catch (error) {
-    const reason = error instanceof Error ? ` (${error.message})` : "";
+  const auth = await getModelIdleSessionAuth(ctx.modelRegistry, ctx.model);
+  if (!auth.ok) {
+    const reason = auth.error ? ` (${auth.error})` : "";
     ctx.ui.setEditorText(reviewMessage);
     ctx.ui.notify(`Saved diff review to the current session. Pi could not validate the current model${reason}, so it was also drafted in the editor. Submit it manually to add it to conversation history.`, "warning");
-    return "drafted";
-  }
-
-  if (!apiKey) {
-    ctx.ui.setEditorText(reviewMessage);
-    ctx.ui.notify("Saved diff review to the current session. Pi could not authenticate the current model, so it was also drafted in the editor. Submit it manually to add it to conversation history.", "warning");
     return "drafted";
   }
 
