@@ -4,7 +4,10 @@ Minimal browser diff review UI for pi.
 
 It keeps the original idea from the session thread, but drops the native window and Monaco plumbing in favor of a smaller browser-only flow:
 
-- `/diff-review` collects the current git diff against `HEAD`
+- `/diff-review` collects the current git diff against the remote default branch
+- `/diff-review main` also compares against the remote default branch
+- `/diff-review current` compares against the upstream of the current branch
+- `/diff-review <ref>` uses any git ref you pass explicitly as the comparison base
 - pi starts a tiny localhost server and opens your browser
 - `@pierre/trees` renders the changed-file tree with explicit review-order numbering
 - the default review sequence in this repo is: config/build → `src/` → `web/` → tests → docs → generated output

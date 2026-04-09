@@ -10,6 +10,19 @@ interface ChangedPath {
   newPath: string | null;
 }
 
+const BASE_REF_COMPLETIONS = [
+  {
+    value: "main",
+    label: "main",
+    description: "Compare against the remote default branch (falls back to HEAD if unavailable)",
+  },
+  {
+    value: "current",
+    label: "current",
+    description: "Compare against the current branch upstream (falls back to HEAD if unavailable)",
+  },
+] as const;
+
 async function runGit(pi: ExtensionAPI, repoRoot: string, args: string[]): Promise<string> {
   const result = await pi.exec("git", args, { cwd: repoRoot });
   if (result.code !== 0) {
@@ -89,8 +102,8 @@ function parseNameStatus(output: string): ChangedPath[] {
   return changes;
 }
 
-async function getHeadContent(pi: ExtensionAPI, repoRoot: string, path: string): Promise<string> {
-  const result = await pi.exec("git", ["show", `HEAD:${path}`], { cwd: repoRoot });
+async function getRefContent(pi: ExtensionAPI, repoRoot: string, ref: string, path: string): Promise<string> {
+  const result = await pi.exec("git", ["show", `${ref}:${path}`], { cwd: repoRoot });
   if (result.code !== 0) {
     return "";
   }
@@ -142,12 +155,115 @@ function toTreePath(change: ChangedPath): string {
   return change.newPath ?? change.oldPath ?? "(unknown)";
 }
 
-export async function getDiffReviewFiles(pi: ExtensionAPI, cwd: string): Promise<{ repoRoot: string; files: DiffReviewFile[] }> {
+function parseRemoteNames(output: string): string[] {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+function getRemoteNameFromRef(ref: string | null): string | null {
+  if (ref == null) {
+    return null;
+  }
+
+  const slashIndex = ref.indexOf("/");
+  if (slashIndex <= 0) {
+    return null;
+  }
+
+  return ref.slice(0, slashIndex);
+}
+
+async function refExists(pi: ExtensionAPI, repoRoot: string, ref: string): Promise<boolean> {
+  const output = await runGitAllowFailure(pi, repoRoot, ["rev-parse", "--verify", ref]);
+  return output.trim().length > 0;
+}
+
+async function getUpstreamRef(pi: ExtensionAPI, repoRoot: string): Promise<string | null> {
+  const output = await runGitAllowFailure(pi, repoRoot, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+  const ref = output.trim();
+  return ref.length > 0 ? ref : null;
+}
+
+async function listRemoteNames(pi: ExtensionAPI, repoRoot: string): Promise<string[]> {
+  return parseRemoteNames(await runGitAllowFailure(pi, repoRoot, ["remote"]));
+}
+
+async function getRemoteHeadRef(pi: ExtensionAPI, repoRoot: string, remote: string): Promise<string | null> {
+  const output = await runGitAllowFailure(pi, repoRoot, ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`]);
+  const ref = output.trim();
+  return ref.length > 0 ? ref : null;
+}
+
+async function getRemoteDefaultBranch(pi: ExtensionAPI, repoRoot: string, remote: string): Promise<string | null> {
+  const remoteHead = await getRemoteHeadRef(pi, repoRoot, remote);
+  if (remoteHead != null) {
+    return remoteHead;
+  }
+
+  for (const candidate of [`${remote}/main`, `${remote}/master`]) {
+    if (await refExists(pi, repoRoot, candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function getDefaultRemoteBranch(pi: ExtensionAPI, repoRoot: string): Promise<string> {
+  const upstreamRemote = getRemoteNameFromRef(await getUpstreamRef(pi, repoRoot));
+  const remotes = [upstreamRemote, "origin", ...(await listRemoteNames(pi, repoRoot))].filter(
+    (remote, index, values): remote is string => remote != null && values.indexOf(remote) === index,
+  );
+
+  for (const remote of remotes) {
+    const candidate = await getRemoteDefaultBranch(pi, repoRoot, remote);
+    if (candidate != null) {
+      return candidate;
+    }
+  }
+
+  return "HEAD";
+}
+
+export async function resolveBaseRef(pi: ExtensionAPI, cwd: string, arg: string): Promise<string> {
   const repoRoot = await getRepoRoot(pi, cwd);
+  const trimmed = arg.trim();
+  if (trimmed.length === 0 || trimmed === "main") {
+    return await getDefaultRemoteBranch(pi, repoRoot);
+  }
+  if (trimmed === "current") {
+    return (await getUpstreamRef(pi, repoRoot)) ?? "HEAD";
+  }
+  return trimmed;
+}
+
+export function getBaseRefCompletions(prefix: string): { value: string; label: string; description: string }[] {
+  return BASE_REF_COMPLETIONS.filter((item) => item.value.startsWith(prefix));
+}
+
+export async function getDiffReviewFiles(pi: ExtensionAPI, cwd: string, baseRef?: string): Promise<{ repoRoot: string; files: DiffReviewFile[] }> {
+  const repoRoot = await getRepoRoot(pi, cwd);
+
+  const ref = baseRef ?? await getDefaultRemoteBranch(pi, repoRoot);
+  const isHead = ref === "HEAD";
+
   const repositoryHasHead = await hasHead(pi, repoRoot);
 
-  const trackedOutput = repositoryHasHead
-    ? await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--name-status", "HEAD", "--"])
+  // When diffing against a remote ref, we need the merge-base to get a clean diff
+  let diffBase: string;
+  if (!repositoryHasHead) {
+    diffBase = "";
+  } else if (isHead) {
+    diffBase = "HEAD";
+  } else {
+    const mergeBaseOutput = await runGitAllowFailure(pi, repoRoot, ["merge-base", ref, "HEAD"]);
+    diffBase = mergeBaseOutput.trim() || ref;
+  }
+
+  const trackedOutput = diffBase.length > 0
+    ? await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--name-status", diffBase, "--"])
     : "";
   const untrackedOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--others", "--exclude-standard"]);
 
@@ -157,7 +273,7 @@ export async function getDiffReviewFiles(pi: ExtensionAPI, cwd: string): Promise
 
   const files = await Promise.all(
     changedPaths.map(async (change, index): Promise<DiffReviewFile> => {
-      const oldContent = change.oldPath == null ? "" : await getHeadContent(pi, repoRoot, change.oldPath);
+      const oldContent = change.oldPath == null ? "" : await getRefContent(pi, repoRoot, diffBase || "HEAD", change.oldPath);
       const newContent = change.newPath == null ? "" : await getWorkingTreeContent(repoRoot, change.newPath);
       return {
         id: `${index}:${change.status}:${change.oldPath ?? ""}:${change.newPath ?? ""}`,

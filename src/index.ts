@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { addHunkExplanations } from "./explain.js";
-import { getDiffReviewFiles } from "./git.js";
+import { getBaseRefCompletions, getDiffReviewFiles, resolveBaseRef } from "./git.js";
 import { getModelIdleSessionAuth } from "./model-auth.js";
 import { composeReviewPrompt } from "./prompt.js";
 import { startReviewServer, type ReviewServerSession } from "./server.js";
@@ -162,13 +162,13 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  async function reviewDiff(ctx: ExtensionCommandContext): Promise<void> {
+  async function reviewDiff(ctx: ExtensionCommandContext, baseRef?: string): Promise<void> {
     if (activeSession != null) {
       ctx.ui.notify("A diff review is already in progress.", "warning");
       return;
     }
 
-    const { repoRoot, files } = await getDiffReviewFiles(pi, ctx.cwd);
+    const { repoRoot, files } = await getDiffReviewFiles(pi, ctx.cwd, baseRef);
     if (files.length === 0) {
       ctx.ui.notify("No git diff to review.", "info");
       return;
@@ -225,9 +225,11 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("diff-review", {
-    description: "Open a browser diff review page and send review feedback into the current session",
-    handler: async (_args, ctx) => {
-      await reviewDiff(ctx);
+    description: "Review against the remote default branch, current upstream, or a git ref in your browser",
+    getArgumentCompletions: (prefix) => getBaseRefCompletions(prefix),
+    handler: async (args, ctx) => {
+      const baseRef = args.trim().length > 0 ? await resolveBaseRef(pi, ctx.cwd, args) : undefined;
+      await reviewDiff(ctx, baseRef);
     },
   });
 
