@@ -226,16 +226,22 @@ function formatRangeLabel(prefix: string, startLine: number | null, endLine: num
   return `${prefix}: ${startLine}-${endLine}`;
 }
 
-// Ask the model for one concise purpose statement per hunk, not review advice.
+// Ask the model for a structured analysis per hunk: what changed, how it works,
+// why it was done, test coverage, and risks.
 function buildExplainPrompt(file: DiffReviewFile, hunks: DiffHunkSeed[]): string {
   const headerLines = [
     "You are explaining code modifications to a developer reading a diff.",
-    `Call the ${EXPLANATION_TOOL_NAME} tool exactly once with one concise explanation per hunk.`,
+    `Call the ${EXPLANATION_TOOL_NAME} tool exactly once with one explanation per hunk.`,
     "Do not answer with plain prose unless tool calling is impossible.",
     "",
+    "For each hunk, provide a structured analysis with these sections:",
+    "- **What changed**: the modification in plain language",
+    "- **How it works now**: behavior after the change",
+    "- **Why**: motivation or best-supported inference from the diff",
+    "- **Tests**: how these lines are tested (reference test files if visible in the diff, or state 'not yet tested')",
+    "- **Risks**: regressions or edge cases to watch",
+    "",
     "Rules:",
-    "- Use one short paragraph per hunk.",
-    "- Focus on intent and effect, not line-by-line narration.",
     "- Do not give review advice or suggest changes.",
     '- If the purpose is unclear from the diff alone, say: "Purpose unclear from the diff alone." Then briefly state the visible change.',
     "",
@@ -548,7 +554,7 @@ export async function addHunkExplanations(
         {
           apiKey: auth.apiKey,
           headers: auth.headers,
-          maxTokens: Math.min(4096, 512 + hunks.length * 192),
+          maxTokens: Math.min(4096, 512 + hunks.length * 256),
         },
       );
     } catch (error) {

@@ -53,13 +53,60 @@ async function hasHead(pi: ExtensionAPI, repoRoot: string): Promise<boolean> {
   return result.code === 0;
 }
 
-function parseNameStatus(output: string): ChangedPath[] {
-  const lines = output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
+function splitNulRecords(output: string): string[] {
+  const records = output.split("\0");
+  if (records[records.length - 1] === "") {
+    records.pop();
+  }
+  return records.filter((record) => record.length > 0);
+}
 
+function parseNameStatus(output: string): ChangedPath[] {
   const changes: ChangedPath[] = [];
+
+  if (output.includes("\0")) {
+    const records = splitNulRecords(output);
+
+    for (let index = 0; index < records.length;) {
+      const rawStatus = records[index] ?? "";
+      index += 1;
+      const code = rawStatus[0];
+
+      if (code === "R") {
+        const oldPath = records[index] ?? null;
+        const newPath = records[index + 1] ?? null;
+        index += 2;
+        if (oldPath != null && newPath != null) {
+          changes.push({ status: "renamed", oldPath, newPath });
+        }
+        continue;
+      }
+
+      const path = records[index] ?? null;
+      index += 1;
+      if (path == null) {
+        continue;
+      }
+
+      if (code === "M") {
+        changes.push({ status: "modified", oldPath: path, newPath: path });
+        continue;
+      }
+
+      if (code === "A") {
+        changes.push({ status: "added", oldPath: null, newPath: path });
+        continue;
+      }
+
+      if (code === "D") {
+        changes.push({ status: "deleted", oldPath: path, newPath: null });
+      }
+    }
+
+    return changes;
+  }
+
+  const lines = output.split(/\r?\n/).filter((line) => line.length > 0);
 
   for (const line of lines) {
     const parts = line.split("\t");
@@ -75,27 +122,23 @@ function parseNameStatus(output: string): ChangedPath[] {
       continue;
     }
 
+    const path = parts[1] ?? null;
+    if (path == null) {
+      continue;
+    }
+
     if (code === "M") {
-      const path = parts[1] ?? null;
-      if (path != null) {
-        changes.push({ status: "modified", oldPath: path, newPath: path });
-      }
+      changes.push({ status: "modified", oldPath: path, newPath: path });
       continue;
     }
 
     if (code === "A") {
-      const path = parts[1] ?? null;
-      if (path != null) {
-        changes.push({ status: "added", oldPath: null, newPath: path });
-      }
+      changes.push({ status: "added", oldPath: null, newPath: path });
       continue;
     }
 
     if (code === "D") {
-      const path = parts[1] ?? null;
-      if (path != null) {
-        changes.push({ status: "deleted", oldPath: path, newPath: null });
-      }
+      changes.push({ status: "deleted", oldPath: path, newPath: null });
     }
   }
 
@@ -119,15 +162,13 @@ async function getWorkingTreeContent(repoRoot: string, path: string): Promise<st
 }
 
 function parseUntrackedPaths(output: string): ChangedPath[] {
-  return output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .map((path) => ({
-      status: "added" as const,
-      oldPath: null,
-      newPath: path,
-    }));
+  const paths = output.includes("\0") ? splitNulRecords(output) : output.split(/\r?\n/).filter((line) => line.length > 0);
+
+  return paths.map((path) => ({
+    status: "added" as const,
+    oldPath: null,
+    newPath: path,
+  }));
 }
 
 function mergeChangedPaths(tracked: ChangedPath[], untracked: ChangedPath[]): ChangedPath[] {
@@ -263,9 +304,9 @@ export async function getDiffReviewFiles(pi: ExtensionAPI, cwd: string, baseRef?
   }
 
   const trackedOutput = diffBase.length > 0
-    ? await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--name-status", diffBase, "--"])
+    ? await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--name-status", "-z", diffBase, "--"])
     : "";
-  const untrackedOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--others", "--exclude-standard"]);
+  const untrackedOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"]);
 
   const trackedPaths = parseNameStatus(trackedOutput);
   const untrackedPaths = parseUntrackedPaths(untrackedOutput);

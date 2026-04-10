@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getBaseRefCompletions, getDiffReviewFiles, resolveBaseRef } from "../src/git.js";
@@ -97,8 +100,8 @@ test("getDiffReviewFiles defaults to the remote default branch when no base ref 
     [key(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])]: ok("origin/main\n"),
     [key(["rev-parse", "--verify", "HEAD"])]: ok("head-sha\n"),
     [key(["merge-base", "origin/main", "HEAD"])]: ok("base-sha\n"),
-    [key(["diff", "--find-renames", "-M", "--name-status", "base-sha", "--"])]: ok("D\tsrc/example.ts\n"),
-    [key(["ls-files", "--others", "--exclude-standard"])]: ok(""),
+    [key(["diff", "--find-renames", "-M", "--name-status", "-z", "base-sha", "--"])]: ok("D\0src/example.ts\0"),
+    [key(["ls-files", "--others", "--exclude-standard", "-z"])]: ok(""),
     [key(["show", "base-sha:src/example.ts"])]: ok("old file\n"),
   });
 
@@ -125,8 +128,81 @@ test("getDiffReviewFiles defaults to the remote default branch when no base ref 
     ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
     ["rev-parse", "--verify", "HEAD"],
     ["merge-base", "origin/main", "HEAD"],
-    ["diff", "--find-renames", "-M", "--name-status", "base-sha", "--"],
-    ["ls-files", "--others", "--exclude-standard"],
+    ["diff", "--find-renames", "-M", "--name-status", "-z", "base-sha", "--"],
+    ["ls-files", "--others", "--exclude-standard", "-z"],
     ["show", "base-sha:src/example.ts"],
+  ]);
+});
+
+test("getDiffReviewFiles preserves unusual paths from NUL-delimited git output", async () => {
+  const repoRoot = "/repo";
+  const weirdPath = "src/weird\tname.ts";
+  const { pi } = createGitPi({
+    [key(["rev-parse", "--show-toplevel"])]: ok(`${repoRoot}\n`),
+    [key(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])]: fail("no upstream"),
+    [key(["remote"])]: ok("origin\n"),
+    [key(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])]: ok("origin/main\n"),
+    [key(["rev-parse", "--verify", "HEAD"])]: ok("head-sha\n"),
+    [key(["merge-base", "origin/main", "HEAD"])]: ok("base-sha\n"),
+    [key(["diff", "--find-renames", "-M", "--name-status", "-z", "base-sha", "--"])]: ok(`D\0${weirdPath}\0`),
+    [key(["ls-files", "--others", "--exclude-standard", "-z"])]: ok(""),
+    [key(["show", `base-sha:${weirdPath}`])]: ok("old file\n"),
+  });
+
+  const { files } = await getDiffReviewFiles(pi, repoRoot);
+
+  assert.deepEqual(files, [
+    {
+      id: `0:deleted:${weirdPath}:`,
+      status: "deleted",
+      oldPath: weirdPath,
+      newPath: null,
+      displayPath: weirdPath,
+      treePath: weirdPath,
+      oldContent: "old file\n",
+      newContent: "",
+      hunkExplanations: [],
+    },
+  ]);
+});
+
+test("getDiffReviewFiles preserves renamed paths from NUL-delimited git output", async (t) => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "pi-diff-review-"));
+  const oldPath = "src/old\tname.ts";
+  const newPath = "src/new\tname.ts";
+
+  t.after(async () => {
+    await rm(repoRoot, { force: true, recursive: true });
+  });
+
+  await mkdir(join(repoRoot, dirname(newPath)), { recursive: true });
+  await writeFile(join(repoRoot, newPath), "new file\n", "utf8");
+
+  const { pi } = createGitPi({
+    [key(["rev-parse", "--show-toplevel"])]: ok(`${repoRoot}\n`),
+    [key(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])]: fail("no upstream"),
+    [key(["remote"])]: ok("origin\n"),
+    [key(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])]: ok("origin/main\n"),
+    [key(["rev-parse", "--verify", "HEAD"])]: ok("head-sha\n"),
+    [key(["merge-base", "origin/main", "HEAD"])]: ok("base-sha\n"),
+    [key(["diff", "--find-renames", "-M", "--name-status", "-z", "base-sha", "--"])]: ok(`R100\0${oldPath}\0${newPath}\0`),
+    [key(["ls-files", "--others", "--exclude-standard", "-z"])]: ok(""),
+    [key(["show", `base-sha:${oldPath}`])]: ok("old file\n"),
+  });
+
+  const { files } = await getDiffReviewFiles(pi, repoRoot);
+
+  assert.deepEqual(files, [
+    {
+      id: `0:renamed:${oldPath}:${newPath}`,
+      status: "renamed",
+      oldPath,
+      newPath,
+      displayPath: `${oldPath} -> ${newPath}`,
+      treePath: newPath,
+      oldContent: "old file\n",
+      newContent: "new file\n",
+      hunkExplanations: [],
+    },
   ]);
 });
