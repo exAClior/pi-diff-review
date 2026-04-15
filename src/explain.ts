@@ -1,31 +1,8 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { complete, Type, type AssistantMessage, type Tool, type ToolCall } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import type {
-  DiffReviewFile,
-  ExplanationFileReason,
-  ExplanationFileStatus,
-  ExplanationStatus,
-  HunkExplanation,
-  ReviewCommentSide,
-} from "./types.js";
+import type { DiffReviewFile, ExplanationFileReason, ExplanationFileStatus, ExplanationStatus, HunkExplanation } from "./types.js";
+import type { DiffHunkSeed, FilePatchResult } from "./patches.js";
 import { getModelCompletionAuth } from "./model-auth.js";
-
-interface DiffHunkSeed {
-  fileId: string;
-  hunkIndex: number;
-  anchorSide: ReviewCommentSide;
-  anchorLine: number;
-  oldStartLine: number | null;
-  oldEndLine: number | null;
-  newStartLine: number | null;
-  newEndLine: number | null;
-  patchText: string;
-}
-
-const HUNK_HEADER_REGEX = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 const EXPLANATION_TOOL_NAME = "submit_hunk_explanations";
 const EXPLANATION_TOOL: Tool = {
   name: EXPLANATION_TOOL_NAME,
@@ -39,180 +16,6 @@ const EXPLANATION_TOOL: Tool = {
     ),
   }),
 };
-
-// Turn a diff header count into an inclusive line range that the browser can label.
-function toLineRange(startLine: number, lineCount: number): { startLine: number | null; endLine: number | null } {
-  if (lineCount <= 0) {
-    return {
-      startLine: null,
-      endLine: null,
-    };
-  }
-
-  return {
-    startLine,
-    endLine: startLine + lineCount - 1,
-  };
-}
-
-// Anchor the explainer note to the first changed line on the current-code side
-// when possible. Using the raw hunk header start can land on a context line,
-// which makes the annotation look detached from the actual modification.
-function findHunkAnchor(
-  oldStartLine: number,
-  newStartLine: number,
-  hunkBody: string[],
-): { anchorSide: ReviewCommentSide; anchorLine: number } {
-  let oldLine = oldStartLine;
-  let newLine = newStartLine;
-  let firstDeletionLine: number | null = null;
-  let firstAdditionLine: number | null = null;
-
-  for (const line of hunkBody) {
-    if (line.startsWith("+")) {
-      firstAdditionLine ??= newLine;
-      newLine += 1;
-      continue;
-    }
-
-    if (line.startsWith("-")) {
-      firstDeletionLine ??= oldLine;
-      oldLine += 1;
-      continue;
-    }
-
-    if (line.startsWith("\\")) {
-      continue;
-    }
-
-    oldLine += 1;
-    newLine += 1;
-  }
-
-  if (firstAdditionLine != null) {
-    return {
-      anchorSide: "additions",
-      anchorLine: firstAdditionLine,
-    };
-  }
-
-  if (firstDeletionLine != null) {
-    return {
-      anchorSide: "deletions",
-      anchorLine: firstDeletionLine,
-    };
-  }
-
-  return {
-    anchorSide: "additions",
-    anchorLine: newStartLine,
-  };
-}
-
-// Parse unified diff text into hunk records we can both explain with the model
-// and later anchor back into the Pierre diff as read-only annotations.
-export function parseUnifiedDiffHunks(fileId: string, diffText: string): DiffHunkSeed[] {
-  const lines = diffText.split(/\r?\n/);
-  const hunks: DiffHunkSeed[] = [];
-  let currentHeader: string | null = null;
-  let currentBody: string[] = [];
-
-  const flush = () => {
-    if (currentHeader == null) {
-      currentBody = [];
-      return;
-    }
-
-    const match = currentHeader.match(HUNK_HEADER_REGEX);
-    if (match == null) {
-      currentHeader = null;
-      currentBody = [];
-      return;
-    }
-
-    const oldStart = Number(match[1]);
-    const oldCount = match[2] == null ? 1 : Number(match[2]);
-    const newStart = Number(match[3]);
-    const newCount = match[4] == null ? 1 : Number(match[4]);
-    const oldRange = toLineRange(oldStart, oldCount);
-    const newRange = toLineRange(newStart, newCount);
-    const { anchorSide, anchorLine } = findHunkAnchor(oldStart, newStart, currentBody);
-
-    hunks.push({
-      fileId,
-      hunkIndex: hunks.length,
-      anchorSide,
-      anchorLine,
-      oldStartLine: oldRange.startLine,
-      oldEndLine: oldRange.endLine,
-      newStartLine: newRange.startLine,
-      newEndLine: newRange.endLine,
-      patchText: [currentHeader, ...currentBody].join("\n").trimEnd(),
-    });
-
-    currentHeader = null;
-    currentBody = [];
-  };
-
-  for (const line of lines) {
-    if (line.startsWith("@@ ")) {
-      flush();
-      currentHeader = line;
-      continue;
-    }
-
-    if (currentHeader != null) {
-      currentBody.push(line);
-    }
-  }
-
-  flush();
-  return hunks;
-}
-
-// Build a no-index patch from the exact old/new text so the model explains the
-// same hunks the browser renders, including added and deleted files.
-export function normalizeUnifiedPatchHeaders(diffText: string, file: DiffReviewFile): string {
-  const lines = diffText.split(/\r?\n/);
-  const normalizedPath = file.newPath ?? file.oldPath ?? file.displayPath;
-
-  if (lines[0]?.startsWith("diff --git ")) {
-    lines[0] = `diff --git a/${normalizedPath} b/${normalizedPath}`;
-  }
-
-  if (lines[2]?.startsWith("--- ")) {
-    lines[2] = `--- ${file.oldPath == null ? "/dev/null" : `a/${file.oldPath}`}`;
-  }
-
-  if (lines[3]?.startsWith("+++ ")) {
-    lines[3] = `+++ ${file.newPath == null ? "/dev/null" : `b/${file.newPath}`}`;
-  }
-
-  return lines.join("\n");
-}
-
-async function buildUnifiedPatch(pi: ExtensionAPI, repoRoot: string, file: DiffReviewFile): Promise<string> {
-  const tempDir = await mkdtemp(join(tmpdir(), "pi-diff-review-"));
-  const oldFilePath = join(tempDir, "before.txt");
-  const newFilePath = join(tempDir, "after.txt");
-
-  try {
-    await Promise.all([writeFile(oldFilePath, file.oldContent, "utf8"), writeFile(newFilePath, file.newContent, "utf8")]);
-
-    const result = await pi.exec("git", ["diff", "--no-index", "--no-ext-diff", "--no-color", "--unified=3", oldFilePath, newFilePath], {
-      cwd: repoRoot,
-    });
-
-    if (result.code !== 0 && result.code !== 1) {
-      const message = result.stderr.trim() || result.stdout.trim() || `failed to diff ${file.displayPath}`;
-      throw new Error(message);
-    }
-
-    return normalizeUnifiedPatchHeaders(result.stdout, file);
-  } finally {
-    await rm(tempDir, { force: true, recursive: true });
-  }
-}
 
 function formatRangeLabel(prefix: string, startLine: number | null, endLine: number | null): string {
   if (startLine == null || endLine == null) {
@@ -479,9 +282,9 @@ export interface AddHunkExplanationsResult {
 export async function addHunkExplanations(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
-  repoRoot: string,
-  files: DiffReviewFile[],
+  patches: FilePatchResult[],
 ): Promise<AddHunkExplanationsResult> {
+  const files = patches.map((patch) => patch.file);
   const model = ctx.model;
   if (model == null) {
     return {
@@ -518,18 +321,15 @@ export async function addHunkExplanations(
   const explainedFiles: DiffReviewFile[] = [];
   const fileStatuses: ExplanationFileStatus[] = [];
 
-  for (const file of files) {
-    let patchText: string;
-    try {
-      patchText = await buildUnifiedPatch(pi, repoRoot, file);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+  for (const patch of patches) {
+    const { file, hunks, error } = patch;
+
+    if (error != null) {
       explainedFiles.push(file);
-      fileStatuses.push(createFileStatus(file, "request-failed", 0, 0, `Could not build a patch for explanation: ${message}`));
+      fileStatuses.push(createFileStatus(file, "request-failed", 0, 0, `Could not build a patch for explanation: ${error}`));
       continue;
     }
 
-    const hunks = parseUnifiedDiffHunks(file.id, patchText);
     if (hunks.length === 0) {
       explainedFiles.push(file);
       fileStatuses.push(createFileStatus(file, "no-hunks", 0, 0, "No diff hunks were found to explain."));

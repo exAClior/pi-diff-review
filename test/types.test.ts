@@ -43,8 +43,24 @@ test("isReviewSubmitPayload accepts the payload emitted by the browser UI", () =
           body: "Range note.",
         },
       ],
+      includedFindingIds: ["finding:0", "finding:1"],
+      includeCallouts: true,
     }),
     true,
+  );
+});
+
+
+test("isReviewSubmitPayload rejects malformed includedFindingIds", () => {
+  assert.equal(
+    isReviewSubmitPayload({
+      type: "submit",
+      overallComment: "",
+      explanationReplies: [],
+      comments: [],
+      includedFindingIds: [42],
+    }),
+    false,
   );
 });
 

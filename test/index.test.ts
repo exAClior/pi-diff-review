@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { deliverReviewToSession } from "../src/index.js";
+import { deliverReviewToSession, parseCommandArgs } from "../src/index.js";
 
 type RequestAuth =
   | {
@@ -334,4 +334,92 @@ test("deliverReviewToSession falls back to legacy getApiKey registries", async (
       tone: "info",
     },
   ]);
+});
+
+test("parseCommandArgs handles empty args, refs, and quoted extra instructions", () => {
+  assert.deepEqual(parseCommandArgs(""), {
+    baseRef: null,
+    extraInstruction: null,
+    error: null,
+  });
+
+  assert.deepEqual(parseCommandArgs("main"), {
+    baseRef: "main",
+    extraInstruction: null,
+    error: null,
+  });
+
+  assert.deepEqual(parseCommandArgs("--extra 'focus on auth'"), {
+    baseRef: null,
+    extraInstruction: "focus on auth",
+    error: null,
+  });
+
+  assert.deepEqual(parseCommandArgs("main --extra \"focus on config defaults\""), {
+    baseRef: "main",
+    extraInstruction: "focus on config defaults",
+    error: null,
+  });
+});
+
+test("parseCommandArgs supports inline, repeated, and empty --extra values", () => {
+  assert.deepEqual(parseCommandArgs("--extra=performance"), {
+    baseRef: null,
+    extraInstruction: "performance",
+    error: null,
+  });
+
+  assert.deepEqual(parseCommandArgs("--extra a --extra b"), {
+    baseRef: null,
+    extraInstruction: "a\nb",
+    error: null,
+  });
+
+  assert.deepEqual(parseCommandArgs("--extra '' main"), {
+    baseRef: "main",
+    extraInstruction: null,
+    error: null,
+  });
+});
+
+test("parseCommandArgs keeps backslashes literal in single-quoted --extra values", () => {
+  assert.deepEqual(parseCommandArgs("--extra 'literal\\path'"), {
+    baseRef: null,
+    extraInstruction: "literal\\path",
+    error: null,
+  });
+});
+
+test("parseCommandArgs reports malformed invocations", () => {
+  assert.deepEqual(parseCommandArgs("--extra"), {
+    baseRef: null,
+    extraInstruction: null,
+    error: "Missing value for --extra",
+  });
+
+  assert.deepEqual(parseCommandArgs("main develop"), {
+    baseRef: null,
+    extraInstruction: null,
+    error: "Unexpected argument: develop",
+  });
+
+  assert.deepEqual(parseCommandArgs("--extra 'oops"), {
+    baseRef: null,
+    extraInstruction: null,
+    error: "Unterminated quote in arguments",
+  });
+
+  assert.deepEqual(parseCommandArgs("--extra trailing\\"), {
+    baseRef: null,
+    extraInstruction: null,
+    error: "Trailing escape character in arguments",
+  });
+});
+
+test("parseCommandArgs respects -- as the end of flag parsing", () => {
+  assert.deepEqual(parseCommandArgs("--extra focus -- release/candidate"), {
+    baseRef: "release/candidate",
+    extraInstruction: "focus",
+    error: null,
+  });
 });

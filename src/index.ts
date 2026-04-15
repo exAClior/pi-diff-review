@@ -2,13 +2,190 @@ import { spawn } from "node:child_process";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { addHunkExplanations } from "./explain.js";
-import { getBaseRefCompletions, getDiffReviewFiles, resolveBaseRef } from "./git.js";
+import { buildFilePatches } from "./patches.js";
+import { getBaseRefCompletions, getDiffReviewFiles, getDiffReviewFilesForCommit, isCommitOnlyRef, resolveBaseRef } from "./git.js";
+import { loadProjectReviewGuidelines } from "./guidelines.js";
 import { getModelIdleSessionAuth } from "./model-auth.js";
 import { composeReviewPrompt } from "./prompt.js";
+import { runAutomatedReview } from "./review.js";
+import { showReviewSelector } from "./selector.js";
 import { startReviewServer, type ReviewServerSession } from "./server.js";
-import { type ReviewSessionResult } from "./types.js";
+import { type DiffReviewFile, type ReviewSessionResult } from "./types.js";
 
 type WaitingEditorResult = "escape" | "review-settled";
+
+export interface ParsedCommandArgs {
+  baseRef: string | null;
+  extraInstruction: string | null;
+  error: string | null;
+}
+
+function tokenizeArgs(value: string): { tokens: string[]; error: string | null } {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  let escaping = false;
+  let tokenStarted = false;
+
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+
+    if (quote === "'") {
+      tokenStarted = true;
+      if (char === "'") {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (quote === '"') {
+      tokenStarted = true;
+
+      if (escaping) {
+        current += char;
+        escaping = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        escaping = true;
+        continue;
+      }
+
+      if (char === '"') {
+        quote = null;
+        continue;
+      }
+
+      current += char;
+      continue;
+    }
+
+    if (escaping) {
+      current += char;
+      escaping = false;
+      tokenStarted = true;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaping = true;
+      tokenStarted = true;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      tokenStarted = true;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (tokenStarted) {
+        tokens.push(current);
+        current = "";
+        tokenStarted = false;
+      }
+      continue;
+    }
+
+    tokenStarted = true;
+    current += char;
+  }
+
+  if (quote != null) {
+    return { tokens: [], error: "Unterminated quote in arguments" };
+  }
+
+  if (escaping) {
+    return { tokens: [], error: "Trailing escape character in arguments" };
+  }
+
+  if (tokenStarted) {
+    tokens.push(current);
+  }
+
+  return { tokens, error: null };
+}
+
+export function parseCommandArgs(args: string): ParsedCommandArgs {
+  const trimmed = args.trim();
+  if (trimmed.length === 0) {
+    return {
+      baseRef: null,
+      extraInstruction: null,
+      error: null,
+    };
+  }
+
+  const tokenized = tokenizeArgs(trimmed);
+  if (tokenized.error != null) {
+    return {
+      baseRef: null,
+      extraInstruction: null,
+      error: tokenized.error,
+    };
+  }
+
+  const rawParts = tokenized.tokens;
+  let baseRef: string | null = null;
+  const extraInstructions: string[] = [];
+
+  for (let index = 0; index < rawParts.length; index += 1) {
+    const part = rawParts[index];
+
+    if (part === "--") {
+      const remainder = rawParts.slice(index + 1).join(" ").trim();
+      if (remainder.length === 0) {
+        break;
+      }
+      if (baseRef != null) {
+        return { baseRef: null, extraInstruction: null, error: `Unexpected argument: ${remainder}` };
+      }
+      baseRef = remainder;
+      break;
+    }
+
+    if (part === "--extra") {
+      const next = rawParts[index + 1];
+      if (next == null) {
+        return { baseRef: null, extraInstruction: null, error: "Missing value for --extra" };
+      }
+      if (next.length > 0) {
+        extraInstructions.push(next);
+      }
+      index += 1;
+      continue;
+    }
+
+    if (part.startsWith("--extra=")) {
+      const value = part.slice("--extra=".length);
+      if (value.length > 0) {
+        extraInstructions.push(value);
+      }
+      continue;
+    }
+
+    if (baseRef == null) {
+      baseRef = part;
+      continue;
+    }
+
+    return {
+      baseRef: null,
+      extraInstruction: null,
+      error: `Unexpected argument: ${part}`,
+    };
+  }
+
+  return {
+    baseRef,
+    extraInstruction: extraInstructions.length > 0 ? extraInstructions.join("\n") : null,
+    error: null,
+  };
+}
 
 // V1 keeps the session itself as the review artifact. Send the composed review
 // back as a real user message instead of inventing a parallel persistence path.
@@ -162,27 +339,65 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  async function reviewDiff(ctx: ExtensionCommandContext, baseRef?: string): Promise<void> {
+  async function reviewDiff(ctx: ExtensionCommandContext, parsedArgs: ParsedCommandArgs): Promise<void> {
     if (activeSession != null) {
       ctx.ui.notify("A diff review is already in progress.", "warning");
       return;
     }
 
-    const { repoRoot, files } = await getDiffReviewFiles(pi, ctx.cwd, baseRef);
+    let repoRoot: string;
+    let files: DiffReviewFile[];
+    let emptyDiffMessage = "No git diff to review.";
+
+    if (parsedArgs.baseRef != null) {
+      if (await isCommitOnlyRef(pi, ctx.cwd, parsedArgs.baseRef)) {
+        ctx.ui.notify("Bare refs only accept branches or tags. Use /diff-review with no arguments, then pick \"Review a specific commit\" for commit review.", "error");
+        return;
+      }
+
+      const resolvedBaseRef = await resolveBaseRef(pi, ctx.cwd, parsedArgs.baseRef);
+      ({ repoRoot, files } = await getDiffReviewFiles(pi, ctx.cwd, resolvedBaseRef));
+    } else {
+      const selection = await showReviewSelector(pi, ctx);
+      if (selection == null) {
+        ctx.ui.notify("Cancelled.", "info");
+        return;
+      }
+
+      if (selection.type === "worktree") {
+        ({ repoRoot, files } = await getDiffReviewFiles(pi, ctx.cwd, selection.baseRef));
+        emptyDiffMessage = "No git diff to review.";
+      } else {
+        ({ repoRoot, files } = await getDiffReviewFilesForCommit(pi, ctx.cwd, selection.sha));
+        emptyDiffMessage = "No changes in commit.";
+      }
+    }
+
     if (files.length === 0) {
-      ctx.ui.notify("No git diff to review.", "info");
+      ctx.ui.notify(emptyDiffMessage, "info");
       return;
     }
 
-    const explanationResult = await addHunkExplanations(pi, ctx, repoRoot, files);
+    const patches = await buildFilePatches(pi, repoRoot, files);
+    const projectGuidelines = await loadProjectReviewGuidelines(ctx.cwd);
+
+    const [explanationResult, automatedReview] = await Promise.all([
+      addHunkExplanations(pi, ctx, patches),
+      runAutomatedReview(pi, ctx, patches, {
+        projectGuidelines,
+        extraInstruction: parsedArgs.extraInstruction,
+      }),
+    ]);
     const { files: filesWithExplanations, status: explanationStatus } = explanationResult;
 
     ctx.ui.notify(explanationStatus.summary, explanationStatus.state === "generated" ? "info" : "warning");
+    ctx.ui.notify(automatedReview.status.summary, automatedReview.status.state === "generated" || automatedReview.status.state === "no-findings" ? "info" : "warning");
 
     const session = await startReviewServer({
       repoRoot,
       files: filesWithExplanations,
       explanationStatus,
+      automatedReview,
     });
     activeSession = session;
 
@@ -213,7 +428,12 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const prompt = composeReviewPrompt(filesWithExplanations, message);
+      const prompt = composeReviewPrompt({
+        files: filesWithExplanations,
+        payload: message,
+        includedFindings: automatedReview.findings.filter((finding) => message.includedFindingIds?.includes(finding.id)),
+        curatedCallouts: message.includeCallouts ? automatedReview.callouts : [],
+      });
       await deliverReviewToSession(pi, ctx, prompt);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -225,11 +445,16 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("diff-review", {
-    description: "Review against the remote default branch, current upstream, or a git ref in your browser",
+    description: "Review against the remote default branch, current upstream, or a branch/tag in your browser",
     getArgumentCompletions: (prefix) => getBaseRefCompletions(prefix),
     handler: async (args, ctx) => {
-      const baseRef = args.trim().length > 0 ? await resolveBaseRef(pi, ctx.cwd, args) : undefined;
-      await reviewDiff(ctx, baseRef);
+      const parsedArgs = parseCommandArgs(args);
+      if (parsedArgs.error != null) {
+        ctx.ui.notify(parsedArgs.error, "error");
+        return;
+      }
+
+      await reviewDiff(ctx, parsedArgs);
     },
   });
 

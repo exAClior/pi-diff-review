@@ -43,3 +43,27 @@ test("hasReviewContent accepts explainer replies or submitted comments without a
     true,
   );
 });
+
+test("hasReviewContent accepts curated automated findings or callouts", () => {
+  assert.equal(
+    hasReviewContent({
+      overallComment: "",
+      explanationReplies: [],
+      comments: [],
+      includedFindingIds: ["finding:0"],
+      includeCallouts: false,
+    }),
+    true,
+  );
+
+  assert.equal(
+    hasReviewContent({
+      overallComment: "",
+      explanationReplies: [],
+      comments: [],
+      includedFindingIds: [],
+      includeCallouts: true,
+    }),
+    true,
+  );
+});

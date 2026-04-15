@@ -10,6 +10,8 @@ interface ChangedPath {
   newPath: string | null;
 }
 
+const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf899d15363da7b23";
+
 const BASE_REF_COMPLETIONS = [
   {
     value: "main",
@@ -38,6 +40,11 @@ async function runGitAllowFailure(pi: ExtensionAPI, repoRoot: string, args: stri
     return "";
   }
   return result.stdout;
+}
+
+async function commandSucceeds(pi: ExtensionAPI, repoRoot: string, args: string[]): Promise<boolean> {
+  const result = await pi.exec("git", args, { cwd: repoRoot });
+  return result.code === 0;
 }
 
 export async function getRepoRoot(pi: ExtensionAPI, cwd: string): Promise<string> {
@@ -171,6 +178,10 @@ function parseUntrackedPaths(output: string): ChangedPath[] {
   }));
 }
 
+function parseTrackedPaths(output: string): ChangedPath[] {
+  return parseUntrackedPaths(output);
+}
+
 function mergeChangedPaths(tracked: ChangedPath[], untracked: ChangedPath[]): ChangedPath[] {
   const seen = new Set(tracked.map((change) => `${change.status}:${change.oldPath ?? ""}:${change.newPath ?? ""}`));
   const merged = [...tracked];
@@ -194,6 +205,36 @@ function toDisplayPath(change: ChangedPath): string {
 
 function toTreePath(change: ChangedPath): string {
   return change.newPath ?? change.oldPath ?? "(unknown)";
+}
+
+function toDiffReviewFile(change: ChangedPath, index: number, oldContent: string, newContent: string): DiffReviewFile {
+  return {
+    id: `${index}:${change.status}:${change.oldPath ?? ""}:${change.newPath ?? ""}`,
+    status: change.status,
+    oldPath: change.oldPath,
+    newPath: change.newPath,
+    displayPath: toDisplayPath(change),
+    treePath: toTreePath(change),
+    oldContent,
+    newContent,
+    hunkExplanations: [],
+  };
+}
+
+async function materializeDiffReviewFiles(
+  changedPaths: ChangedPath[],
+  readOldContent: (change: ChangedPath) => Promise<string>,
+  readNewContent: (change: ChangedPath) => Promise<string>,
+): Promise<DiffReviewFile[]> {
+  const files = await Promise.all(
+    changedPaths.map(async (change, index) => {
+      const oldContent = change.oldPath == null ? "" : await readOldContent(change);
+      const newContent = change.newPath == null ? "" : await readNewContent(change);
+      return toDiffReviewFile(change, index, oldContent, newContent);
+    }),
+  );
+
+  return sortFilesForReview(files);
 }
 
 function parseRemoteNames(output: string): string[] {
@@ -268,6 +309,123 @@ async function getDefaultRemoteBranch(pi: ExtensionAPI, repoRoot: string): Promi
   return "HEAD";
 }
 
+function parseRecentCommits(output: string): Array<{ sha: string; title: string }> {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const [sha = "", ...rest] = line.split(/\s+/);
+      return {
+        sha,
+        title: rest.join(" "),
+      };
+    })
+    .filter((commit) => commit.sha.length > 0);
+}
+
+function parseParents(output: string): string[] {
+  const [line = ""] = output.split(/\r?\n/);
+  const tokens = line.trim().split(/\s+/).filter((token) => token.length > 0);
+  if (tokens.length <= 1) {
+    return [];
+  }
+  return tokens.slice(1);
+}
+
+async function getMergeBaseInRepo(pi: ExtensionAPI, repoRoot: string, ref: string, target = "HEAD"): Promise<string | null> {
+  const mergeBaseOutput = await runGitAllowFailure(pi, repoRoot, ["merge-base", ref, target]);
+  const mergeBase = mergeBaseOutput.trim();
+  return mergeBase.length > 0 ? mergeBase : null;
+}
+
+export async function getMergeBase(pi: ExtensionAPI, cwd: string, ref: string, target = "HEAD"): Promise<string | null> {
+  const repoRoot = await getRepoRoot(pi, cwd);
+  return await getMergeBaseInRepo(pi, repoRoot, ref, target);
+}
+
+async function getLocalBranchesInRepo(pi: ExtensionAPI, repoRoot: string): Promise<string[]> {
+  const output = await runGitAllowFailure(pi, repoRoot, ["branch", "--format=%(refname:short)"]);
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+async function getCurrentBranchInRepo(pi: ExtensionAPI, repoRoot: string): Promise<string | null> {
+  const output = await runGitAllowFailure(pi, repoRoot, ["branch", "--show-current"]);
+  const branch = output.trim();
+  return branch.length > 0 ? branch : null;
+}
+
+async function getDefaultBranchInRepo(pi: ExtensionAPI, repoRoot: string): Promise<string> {
+  const defaultRemoteBranch = await getDefaultRemoteBranch(pi, repoRoot);
+  if (defaultRemoteBranch !== "HEAD") {
+    const remoteName = getRemoteNameFromRef(defaultRemoteBranch);
+    if (remoteName != null) {
+      return defaultRemoteBranch.slice(remoteName.length + 1);
+    }
+  }
+
+  const branches = await getLocalBranchesInRepo(pi, repoRoot);
+  if (branches.includes("main")) return "main";
+  if (branches.includes("master")) return "master";
+  return (await getCurrentBranchInRepo(pi, repoRoot)) ?? "main";
+}
+
+export async function getLocalBranches(pi: ExtensionAPI, cwd: string): Promise<string[]> {
+  const repoRoot = await getRepoRoot(pi, cwd);
+  return await getLocalBranchesInRepo(pi, repoRoot);
+}
+
+export async function getRecentCommits(pi: ExtensionAPI, cwd: string, limit = 20): Promise<Array<{ sha: string; title: string }>> {
+  const repoRoot = await getRepoRoot(pi, cwd);
+  const output = await runGitAllowFailure(pi, repoRoot, ["log", "--oneline", `-n`, String(limit)]);
+  return parseRecentCommits(output);
+}
+
+export async function getCurrentBranch(pi: ExtensionAPI, cwd: string): Promise<string | null> {
+  const repoRoot = await getRepoRoot(pi, cwd);
+  return await getCurrentBranchInRepo(pi, repoRoot);
+}
+
+export async function getDefaultBranch(pi: ExtensionAPI, cwd: string): Promise<string> {
+  const repoRoot = await getRepoRoot(pi, cwd);
+  return await getDefaultBranchInRepo(pi, repoRoot);
+}
+
+async function hasNamedRef(pi: ExtensionAPI, repoRoot: string, ref: string): Promise<boolean> {
+  const candidates = [`refs/heads/${ref}`, `refs/tags/${ref}`, `refs/remotes/${ref}`];
+
+  for (const candidate of candidates) {
+    if (await commandSucceeds(pi, repoRoot, ["show-ref", "--verify", "--quiet", candidate])) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export async function isCommitOnlyRef(pi: ExtensionAPI, cwd: string, ref: string): Promise<boolean> {
+  const trimmed = ref.trim();
+  if (trimmed.length === 0 || trimmed === "HEAD" || trimmed === "main" || trimmed === "current") {
+    return false;
+  }
+
+  const repoRoot = await getRepoRoot(pi, cwd);
+  if (await hasNamedRef(pi, repoRoot, trimmed)) {
+    return false;
+  }
+
+  return await commandSucceeds(pi, repoRoot, ["rev-parse", "--verify", `${trimmed}^{commit}`]);
+}
+
+export async function hasUncommittedChanges(pi: ExtensionAPI, cwd: string): Promise<boolean> {
+  const repoRoot = await getRepoRoot(pi, cwd);
+  const output = await runGitAllowFailure(pi, repoRoot, ["status", "--porcelain"]);
+  return output.trim().length > 0;
+}
+
 export async function resolveBaseRef(pi: ExtensionAPI, cwd: string, arg: string): Promise<string> {
   const repoRoot = await getRepoRoot(pi, cwd);
   const trimmed = arg.trim();
@@ -292,43 +450,58 @@ export async function getDiffReviewFiles(pi: ExtensionAPI, cwd: string, baseRef?
 
   const repositoryHasHead = await hasHead(pi, repoRoot);
 
-  // When diffing against a remote ref, we need the merge-base to get a clean diff
   let diffBase: string;
   if (!repositoryHasHead) {
     diffBase = "";
   } else if (isHead) {
     diffBase = "HEAD";
   } else {
-    const mergeBaseOutput = await runGitAllowFailure(pi, repoRoot, ["merge-base", ref, "HEAD"]);
-    diffBase = mergeBaseOutput.trim() || ref;
+    diffBase = (await getMergeBaseInRepo(pi, repoRoot, ref, "HEAD")) ?? ref;
   }
 
   const trackedOutput = diffBase.length > 0
     ? await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--name-status", "-z", diffBase, "--"])
-    : "";
+    : await runGitAllowFailure(pi, repoRoot, ["ls-files", "-z"]);
   const untrackedOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"]);
 
-  const trackedPaths = parseNameStatus(trackedOutput);
+  const trackedPaths = diffBase.length > 0 ? parseNameStatus(trackedOutput) : parseTrackedPaths(trackedOutput);
   const untrackedPaths = parseUntrackedPaths(untrackedOutput);
   const changedPaths = mergeChangedPaths(trackedPaths, untrackedPaths);
 
-  const files = await Promise.all(
-    changedPaths.map(async (change, index): Promise<DiffReviewFile> => {
-      const oldContent = change.oldPath == null ? "" : await getRefContent(pi, repoRoot, diffBase || "HEAD", change.oldPath);
-      const newContent = change.newPath == null ? "" : await getWorkingTreeContent(repoRoot, change.newPath);
-      return {
-        id: `${index}:${change.status}:${change.oldPath ?? ""}:${change.newPath ?? ""}`,
-        status: change.status,
-        oldPath: change.oldPath,
-        newPath: change.newPath,
-        displayPath: toDisplayPath(change),
-        treePath: toTreePath(change),
-        oldContent,
-        newContent,
-        hunkExplanations: [],
-      };
-    }),
+  const files = await materializeDiffReviewFiles(
+    changedPaths,
+    async (change) => await getRefContent(pi, repoRoot, diffBase || "HEAD", change.oldPath ?? ""),
+    async (change) => await getWorkingTreeContent(repoRoot, change.newPath ?? ""),
   );
 
-  return { repoRoot, files: sortFilesForReview(files) };
+  return { repoRoot, files };
+}
+
+export async function getDiffReviewFilesForCommit(
+  pi: ExtensionAPI,
+  cwd: string,
+  sha: string,
+): Promise<{ repoRoot: string; files: DiffReviewFile[] }> {
+  const repoRoot = await getRepoRoot(pi, cwd);
+  await runGit(pi, repoRoot, ["rev-parse", "--verify", sha]);
+
+  const parents = parseParents(await runGit(pi, repoRoot, ["rev-list", "--parents", "-n", "1", sha]));
+  const parentRef = parents[0] ?? EMPTY_TREE_SHA;
+  const isRootCommit = parents.length === 0;
+
+  const trackedOutput = await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--name-status", "-z", parentRef, sha, "--"]);
+  const changedPaths = parseNameStatus(trackedOutput);
+
+  const files = await materializeDiffReviewFiles(
+    changedPaths,
+    async (change) => {
+      if (isRootCommit) {
+        return "";
+      }
+      return await getRefContent(pi, repoRoot, parentRef, change.oldPath ?? "");
+    },
+    async (change) => await getRefContent(pi, repoRoot, sha, change.newPath ?? ""),
+  );
+
+  return { repoRoot, files };
 }

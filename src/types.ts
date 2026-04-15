@@ -1,3 +1,5 @@
+export type { DiffHunkSeed, FilePatchResult } from "./patches.js";
+
 export type ChangeStatus = "modified" | "added" | "deleted" | "renamed";
 
 export interface HunkExplanation {
@@ -17,6 +19,10 @@ export interface ExplanationReply {
   explanationId: string;
   body: string;
 }
+
+export type ReviewTarget =
+  | { type: "worktree"; baseRef: string }
+  | { type: "commit"; sha: string };
 
 export interface DiffReviewFile {
   id: string;
@@ -62,11 +68,62 @@ export interface RangeReviewComment extends ReviewCommentBase {
 
 export type ReviewComment = FileReviewComment | LineReviewComment | RangeReviewComment;
 
+export type ReviewFindingPriority = "P0" | "P1" | "P2" | "P3";
+export type ReviewFindingSide = "old" | "new";
+export type ReviewVerdict = "correct" | "needs_attention";
+
+export interface ReviewFindingLocation {
+  fileId: string | null;
+  filePath: string;
+  startLine: number | null;
+  endLine: number | null;
+  side: ReviewFindingSide | null;
+}
+
+export interface ReviewFinding {
+  id: string;
+  priority: ReviewFindingPriority;
+  title: string;
+  body: string;
+  suggestion?: string;
+  location: ReviewFindingLocation;
+}
+
+export interface ReviewCallout {
+  category: string;
+  detail: string;
+}
+
+export type AutomatedReviewState =
+  | "generated"
+  | "no-findings"
+  | "skipped-no-model"
+  | "skipped-no-auth"
+  | "skipped-too-large"
+  | "request-failed"
+  | "invalid-response";
+
+export interface AutomatedReviewStatus {
+  state: AutomatedReviewState;
+  attempted: boolean;
+  modelLabel: string | null;
+  summary: string;
+}
+
+export interface AutomatedReviewResult {
+  verdict: ReviewVerdict | null;
+  findings: ReviewFinding[];
+  callouts: ReviewCallout[];
+  status: AutomatedReviewStatus;
+}
+
 export interface ReviewSubmitPayload {
   type: "submit";
   overallComment: string;
   explanationReplies: ExplanationReply[];
   comments: ReviewComment[];
+  includedFindingIds?: string[];
+  includeCallouts?: boolean;
 }
 
 export interface ReviewCancelPayload {
@@ -101,6 +158,7 @@ export interface DiffReviewWindowData {
   repoRoot: string;
   files: DiffReviewFile[];
   explanationStatus?: ExplanationStatus;
+  automatedReview?: AutomatedReviewResult;
 }
 
 function isLineNumber(value: unknown): value is number {
@@ -168,6 +226,9 @@ export function isReviewSubmitPayload(value: unknown): value is ReviewSubmitPayl
     Array.isArray(candidate.explanationReplies) &&
     candidate.explanationReplies.every(isExplanationReply) &&
     Array.isArray(candidate.comments) &&
-    candidate.comments.every(isReviewComment)
+    candidate.comments.every(isReviewComment) &&
+    (candidate.includedFindingIds == null ||
+      (Array.isArray(candidate.includedFindingIds) && candidate.includedFindingIds.every((item) => typeof item === "string"))) &&
+    (candidate.includeCallouts == null || typeof candidate.includeCallouts === "boolean")
   );
 }

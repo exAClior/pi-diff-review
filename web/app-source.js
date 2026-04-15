@@ -37,8 +37,13 @@ if (!Array.isArray(reviewData.files) || reviewData.files.length === 0) {
   fatal("No changed files were provided for review.");
 }
 
+const automatedReview = reviewData.automatedReview ?? null;
+const automatedFindings = Array.isArray(automatedReview?.findings) ? automatedReview.findings : [];
+const automatedCallouts = Array.isArray(automatedReview?.callouts) ? automatedReview.callouts : [];
+
 const state = {
   activeFileId: reviewData.files[0].id,
+  activeRightPaneTab: "notes",
   overallComment: "",
   comments: [],
   explanationReplies: reviewData.files.flatMap((file) =>
@@ -49,6 +54,12 @@ const state = {
       draftBody: "",
     })),
   ),
+  includedFindingIds: new Set(
+    automatedFindings
+      .filter((finding) => finding.priority === "P0" || finding.priority === "P1")
+      .map((finding) => finding.id),
+  ),
+  includeCallouts: false,
   busy: false,
   settled: false,
 };
@@ -62,12 +73,14 @@ const explanationsById = new Map(
   reviewData.files.flatMap((file) => (Array.isArray(file.hunkExplanations) ? file.hunkExplanations : []).map((explanation) => [explanation.id, explanation])),
 );
 const explanationRepliesByExplanationId = new Map(state.explanationReplies.map((reply) => [reply.explanationId, reply]));
+const findingsById = new Map(automatedFindings.map((finding) => [finding.id, finding]));
 const totalExplanationCount = reviewData.files.reduce(
   (count, file) => count + (Array.isArray(file.hunkExplanations) ? file.hunkExplanations.length : 0),
   0,
 );
 
 const repoRootEl = document.getElementById("repo-root");
+const reviewVerdictEl = document.getElementById("review-verdict");
 const summaryEl = document.getElementById("summary");
 const contentGridEl = document.getElementById("content-grid");
 const leftPaneSplitterEl = document.getElementById("left-pane-splitter");
@@ -85,6 +98,8 @@ const cancelButton = document.getElementById("cancel-button");
 const overallNoteButton = document.getElementById("overall-note-button");
 const diffModeColumnButton = document.getElementById("diff-mode-column-button");
 const diffModeStackedButton = document.getElementById("diff-mode-stacked-button");
+const notesTabButton = document.getElementById("notes-tab-button");
+const findingsTabButton = document.getElementById("findings-tab-button");
 const fileCommentButton = document.getElementById("file-comment-button");
 
 repoRootEl.textContent = reviewData.repoRoot;
@@ -182,6 +197,20 @@ overallNoteButton.addEventListener("click", () => {
   });
 });
 
+notesTabButton.addEventListener("click", () => {
+  if (state.activeRightPaneTab === "notes") return;
+  state.activeRightPaneTab = "notes";
+  renderChrome();
+  renderFileComments();
+});
+
+findingsTabButton.addEventListener("click", () => {
+  if (state.activeRightPaneTab === "findings") return;
+  state.activeRightPaneTab = "findings";
+  renderChrome();
+  renderFileComments();
+});
+
 fileCommentButton.addEventListener("click", () => {
   if (state.settled || state.busy) return;
   const file = activeFile();
@@ -272,6 +301,126 @@ function countSubmittedExplanationReplies() {
   return state.explanationReplies.filter(isExplanationReplySubmitted).length;
 }
 
+function describeAutomatedReviewVerdict() {
+  if (automatedReview == null) {
+    return null;
+  }
+
+  if (automatedReview.verdict === "correct") {
+    return { tone: "correct", text: "✅ Looks correct" };
+  }
+
+  if (automatedReview.verdict === "needs_attention") {
+    return { tone: "needs-attention", text: "⚠️ Needs attention" };
+  }
+
+  if (automatedReview.status?.state?.startsWith("skipped")) {
+    return { tone: "skipped", text: "Automated review skipped" };
+  }
+
+  if (automatedReview.status?.state === "request-failed" || automatedReview.status?.state === "invalid-response") {
+    return { tone: "failed", text: "Automated review unavailable" };
+  }
+
+  return null;
+}
+
+function describeFindingsSummary(includedFindingCount) {
+  if (automatedReview == null) {
+    return null;
+  }
+
+  if (automatedFindings.length > 0) {
+    const priorityBreakdown = ["P0", "P1", "P2", "P3"]
+      .map((priority) => {
+        const count = automatedFindings.filter((finding) => finding.priority === priority).length;
+        return count > 0 ? `${count} ${priority}` : null;
+      })
+      .filter(Boolean)
+      .join(", ");
+
+    return `review: ${automatedFindings.length} finding${automatedFindings.length === 1 ? "" : "s"} (${includedFindingCount} selected · ${priorityBreakdown})`;
+  }
+
+  if (automatedReview.status?.state === "no-findings") {
+    return automatedCallouts.length > 0
+      ? `review: clean (${automatedCallouts.length} optional callout${automatedCallouts.length === 1 ? "" : "s"})`
+      : "review: clean";
+  }
+
+  if (automatedReview.status?.state?.startsWith("skipped")) {
+    return "review: skipped";
+  }
+
+  if (automatedReview.status?.state === "request-failed" || automatedReview.status?.state === "invalid-response") {
+    return "review: unavailable";
+  }
+
+  return "review: pending";
+}
+
+function countIncludedFindings() {
+  return automatedFindings.filter((finding) => state.includedFindingIds.has(finding.id)).length;
+}
+
+function countOtherFileFindings(fileId) {
+  return automatedFindings.filter((finding) => finding.location?.fileId != null && finding.location.fileId !== fileId).length;
+}
+
+function describeFindingsPaneMeta(currentFileFindings, globalFindings, otherFileFindingsCount) {
+  if (automatedFindings.length === 0) {
+    return automatedCallouts.length > 0
+      ? `Clean · ${automatedCallouts.length} optional callout${automatedCallouts.length === 1 ? "" : "s"}`
+      : "Clean";
+  }
+
+  const parts = [];
+  if (currentFileFindings.length > 0) {
+    parts.push(`${currentFileFindings.length} in this file`);
+  }
+  if (globalFindings.length > 0) {
+    parts.push(`${globalFindings.length} across files`);
+  }
+  if (otherFileFindingsCount > 0) {
+    parts.push(`${otherFileFindingsCount} on other files`);
+  }
+
+  return parts.join(" · ");
+}
+
+function createFindingsOverview(includedFindingCount) {
+  if (automatedFindings.length === 0 && automatedCallouts.length === 0) {
+    return null;
+  }
+
+  const overview = document.createElement("section");
+  overview.className = "findings-overview";
+
+  const title = document.createElement("div");
+  title.className = "comment-card-title findings-overview-title";
+
+  const summaryParts = [];
+  if (automatedFindings.length > 0) {
+    summaryParts.push(`${automatedFindings.length} total finding${automatedFindings.length === 1 ? "" : "s"}`);
+    summaryParts.push(`${includedFindingCount} selected`);
+  } else {
+    summaryParts.push("No issues found. ✅");
+  }
+  if (automatedCallouts.length > 0) {
+    summaryParts.push(`${automatedCallouts.length} optional callout${automatedCallouts.length === 1 ? "" : "s"}`);
+  }
+  title.textContent = summaryParts.join(" · ");
+
+  const hint = document.createElement("p");
+  hint.className = "findings-overview-hint";
+  hint.textContent = automatedFindings.length > 0
+    ? "Suggestions only. Only selected items are sent on submit."
+    : "Informational only. Callouts stay off unless you include them.";
+
+  overview.append(title, hint);
+  return overview;
+}
+
 function renderChrome() {
   const file = activeFile();
   const submittedCommentCount = state.comments.filter(isCommentSubmitted).length;
@@ -279,16 +428,58 @@ function renderChrome() {
   const submittedExplanationReplyCount = countSubmittedExplanationReplies();
   const draftExplanationReplyCount = state.explanationReplies.filter(needsExplanationReplySubmission).length;
   const reviewIndex = reviewIndexByFileId.get(file.id) ?? 0;
-  summaryEl.textContent = `${reviewData.files.length} file(s) · ${totalExplanationCount} explainer note(s) · ${submittedCommentCount} submitted comment(s)${draftCommentCount > 0 ? ` · ${draftCommentCount} draft comment(s)` : ""}${submittedExplanationReplyCount > 0 ? ` · ${submittedExplanationReplyCount} submitted explainer repl${submittedExplanationReplyCount === 1 ? "y" : "ies"}` : ""}${draftExplanationReplyCount > 0 ? ` · ${draftExplanationReplyCount} draft explainer repl${draftExplanationReplyCount === 1 ? "y" : "ies"}` : ""}${state.overallComment ? " · overall note" : ""}`;
+  const includedFindingCount = countIncludedFindings();
+  const summaryParts = [`${reviewData.files.length} file(s)`, `${totalExplanationCount} explainer note(s)`];
+  const findingsSummary = describeFindingsSummary(includedFindingCount);
+
+  if (findingsSummary != null) {
+    summaryParts.push(findingsSummary);
+  }
+  if (submittedCommentCount > 0) {
+    summaryParts.push(`${submittedCommentCount} submitted comment(s)`);
+  }
+  if (draftCommentCount > 0) {
+    summaryParts.push(`${draftCommentCount} draft comment(s)`);
+  }
+  if (submittedExplanationReplyCount > 0) {
+    summaryParts.push(`${submittedExplanationReplyCount} submitted explainer repl${submittedExplanationReplyCount === 1 ? "y" : "ies"}`);
+  }
+  if (draftExplanationReplyCount > 0) {
+    summaryParts.push(`${draftExplanationReplyCount} draft explainer repl${draftExplanationReplyCount === 1 ? "y" : "ies"}`);
+  }
+  if (state.overallComment) {
+    summaryParts.push("overall note");
+  }
+  if (state.includeCallouts && automatedCallouts.length > 0) {
+    summaryParts.push("callouts included");
+  }
+
+  summaryEl.textContent = summaryParts.join(" · ");
   currentFileLabelEl.textContent = file.displayPath;
   currentFileOrderEl.textContent = `Recommended review ${reviewIndex + 1} of ${reviewData.files.length}`;
   currentFileMetaEl.textContent = describeFileStatus(file);
+
+  const verdict = describeAutomatedReviewVerdict();
+  if (verdict == null) {
+    reviewVerdictEl.hidden = true;
+    reviewVerdictEl.textContent = "";
+    delete reviewVerdictEl.dataset.tone;
+  } else {
+    reviewVerdictEl.hidden = false;
+    reviewVerdictEl.dataset.tone = verdict.tone;
+    reviewVerdictEl.textContent = verdict.text;
+  }
+
+  notesTabButton.classList.toggle("is-active", state.activeRightPaneTab === "notes");
+  findingsTabButton.classList.toggle("is-active", state.activeRightPaneTab === "findings");
+  notesTabButton.setAttribute("aria-selected", String(state.activeRightPaneTab === "notes"));
+  findingsTabButton.setAttribute("aria-selected", String(state.activeRightPaneTab === "findings"));
 
   const disabled = state.busy || state.settled;
   submitButton.disabled = disabled;
   cancelButton.disabled = disabled;
   overallNoteButton.disabled = disabled;
-  fileCommentButton.disabled = disabled;
+  fileCommentButton.disabled = disabled || state.activeRightPaneTab !== "notes";
 }
 
 function setActiveFile(fileId, syncTree = true) {
@@ -403,7 +594,7 @@ function addInlineCommentFromRange(range) {
   refreshInlineComments();
 }
 
-function renderFileComments() {
+function renderNotesPane() {
   const file = activeFile();
   const explanations = Array.isArray(file.hunkExplanations) ? file.hunkExplanations : [];
   const comments = state.comments.filter((comment) => comment.fileId === file.id && comment.kind === "file");
@@ -431,6 +622,15 @@ function renderFileComments() {
   }
 }
 
+function renderFileComments() {
+  if (state.activeRightPaneTab === "findings") {
+    renderFindingsPane();
+    return;
+  }
+
+  renderNotesPane();
+}
+
 function describeCommentTarget(comment) {
   if (comment.kind === "file") {
     return "File comment";
@@ -455,6 +655,224 @@ function createEmptyNotesState() {
   emptyState.className = "notes-empty-state";
   emptyState.textContent = "No explainer notes or file comments for this file yet.";
   return emptyState;
+}
+
+function createFindingsEmptyState(message) {
+  const emptyState = document.createElement("div");
+  emptyState.className = "notes-empty-state";
+  emptyState.textContent = message;
+  return emptyState;
+}
+
+function formatFindingLocation(location) {
+  if (location.fileId == null) {
+    return location.filePath || "Across files";
+  }
+
+  if (location.startLine == null || location.side == null) {
+    return location.filePath;
+  }
+
+  const suffix = location.side === "old" ? " (old)" : " (new)";
+  if (location.endLine != null && location.endLine !== location.startLine) {
+    return `${location.filePath}:${location.startLine}-${location.endLine}${suffix}`;
+  }
+
+  return `${location.filePath}:${location.startLine}${suffix}`;
+}
+
+function renderFindingsPane() {
+  const file = activeFile();
+  const currentFileFindings = automatedFindings.filter((finding) => finding.location?.fileId === file.id);
+  const globalFindings = automatedFindings.filter((finding) => finding.location?.fileId == null);
+  const otherFileFindingsCount = countOtherFileFindings(file.id);
+  const includedFindingCount = countIncludedFindings();
+
+  fileCommentsEl.innerHTML = "";
+
+  if (automatedReview == null) {
+    notesPaneMetaEl.textContent = "Automated review unavailable";
+    fileCommentsEl.appendChild(createFindingsEmptyState("Automated review data was not available for this diff."));
+    return;
+  }
+
+  if (automatedReview.status?.state === "skipped-no-model" || automatedReview.status?.state === "skipped-no-auth" || automatedReview.status?.state === "skipped-too-large") {
+    notesPaneMetaEl.textContent = "Automated review skipped";
+    fileCommentsEl.appendChild(createFindingsEmptyState(automatedReview.status.summary));
+    return;
+  }
+
+  if (automatedReview.status?.state === "request-failed" || automatedReview.status?.state === "invalid-response") {
+    notesPaneMetaEl.textContent = "Automated review unavailable";
+    fileCommentsEl.appendChild(createFindingsEmptyState(`${automatedReview.status.summary} You can still review manually.`));
+    return;
+  }
+
+  notesPaneMetaEl.textContent = describeFindingsPaneMeta(currentFileFindings, globalFindings, otherFileFindingsCount);
+
+  const overview = createFindingsOverview(includedFindingCount);
+  if (overview != null) {
+    fileCommentsEl.appendChild(overview);
+  }
+
+  if (currentFileFindings.length > 0) {
+    fileCommentsEl.appendChild(createNotesSectionLabel("This file"));
+    for (const finding of currentFileFindings) {
+      fileCommentsEl.appendChild(createFindingCard(finding));
+    }
+  }
+
+  if (globalFindings.length > 0) {
+    fileCommentsEl.appendChild(createNotesSectionLabel("Across files"));
+    for (const finding of globalFindings) {
+      fileCommentsEl.appendChild(createFindingCard(finding));
+    }
+  }
+
+  if (currentFileFindings.length === 0 && globalFindings.length === 0) {
+    if (automatedFindings.length === 0 && automatedCallouts.length === 0) {
+      fileCommentsEl.appendChild(createFindingsEmptyState("No issues found. ✅"));
+    } else if (automatedFindings.length > 0) {
+      fileCommentsEl.appendChild(
+        createFindingsEmptyState(
+          `No findings for this file. ${otherFileFindingsCount} finding${otherFileFindingsCount === 1 ? "" : "s"} ${otherFileFindingsCount === 1 ? "is" : "are"} on other file${otherFileFindingsCount === 1 ? "" : "s"}.`,
+        ),
+      );
+    }
+  }
+
+  if (automatedCallouts.length > 0) {
+    fileCommentsEl.appendChild(createCalloutsSection());
+  }
+}
+
+function createFindingCard(finding) {
+  const card = document.createElement("section");
+  card.className = "comment-card finding-card";
+
+  const header = document.createElement("div");
+  header.className = "comment-card-header";
+
+  const heading = document.createElement("div");
+  heading.className = "comment-card-heading";
+
+  const badge = document.createElement("span");
+  badge.className = `finding-priority finding-priority-${finding.priority.toLowerCase()}`;
+  badge.textContent = finding.priority;
+
+  const title = document.createElement("div");
+  title.className = "comment-card-title";
+  title.textContent = finding.title;
+
+  const locationButton = document.createElement(finding.location?.fileId != null ? "button" : "div");
+  locationButton.className = finding.location?.fileId != null ? "finding-location finding-location-button" : "finding-location";
+  locationButton.textContent = formatFindingLocation(finding.location);
+  if (finding.location?.fileId != null) {
+    locationButton.type = "button";
+    locationButton.addEventListener("click", () => {
+      setActiveFile(finding.location.fileId);
+    });
+  }
+
+  heading.append(badge, title, locationButton);
+  header.append(heading);
+
+  const body = document.createElement("p");
+  body.className = "explanation-body";
+  body.textContent = finding.body;
+
+  const actions = document.createElement("div");
+  actions.className = "finding-actions";
+
+  const includeLabel = document.createElement("label");
+  includeLabel.className = "finding-toggle";
+
+  const includeCheckbox = document.createElement("input");
+  includeCheckbox.type = "checkbox";
+  includeCheckbox.setAttribute("aria-label", `Include finding: ${finding.title}`);
+  includeCheckbox.checked = state.includedFindingIds.has(finding.id);
+  includeCheckbox.disabled = state.busy || state.settled;
+  includeCheckbox.addEventListener("change", () => {
+    if (includeCheckbox.checked) {
+      state.includedFindingIds.add(finding.id);
+    } else {
+      state.includedFindingIds.delete(finding.id);
+    }
+    renderChrome();
+    renderFileComments();
+  });
+
+  const includeText = document.createElement("span");
+  includeText.textContent = "Include";
+
+  includeLabel.append(includeCheckbox, includeText);
+  actions.append(includeLabel);
+
+  card.append(header, body);
+
+  if (typeof finding.suggestion === "string" && finding.suggestion.length > 0) {
+    const suggestionLabel = document.createElement("div");
+    suggestionLabel.className = "notes-section-label";
+    suggestionLabel.textContent = "Suggested change";
+
+    const suggestionBlock = document.createElement("pre");
+    suggestionBlock.className = "finding-suggestion";
+    suggestionBlock.textContent = finding.suggestion;
+    card.append(suggestionLabel, suggestionBlock);
+  }
+
+  card.append(actions);
+  return card;
+}
+
+function createCalloutsSection() {
+  const details = document.createElement("details");
+  details.className = "callouts-section";
+
+  const summary = document.createElement("summary");
+  summary.textContent = `Optional callouts (${automatedCallouts.length})`;
+
+  const hint = document.createElement("p");
+  hint.className = "callouts-hint";
+  hint.textContent = "Informational only. Not sent unless you include them.";
+
+  const toggleLabel = document.createElement("label");
+  toggleLabel.className = "finding-toggle callouts-toggle";
+
+  const toggle = document.createElement("input");
+  toggle.type = "checkbox";
+  toggle.checked = state.includeCallouts;
+  toggle.disabled = state.busy || state.settled;
+  toggle.addEventListener("change", () => {
+    state.includeCallouts = toggle.checked;
+    renderChrome();
+  });
+
+  const toggleText = document.createElement("span");
+  toggleText.textContent = "Include callouts";
+  toggleLabel.append(toggle, toggleText);
+
+  const list = document.createElement("div");
+  list.className = "callouts-list";
+
+  for (const callout of automatedCallouts) {
+    const item = document.createElement("section");
+    item.className = "comment-card finding-card callout-card";
+
+    const title = document.createElement("div");
+    title.className = "comment-card-title";
+    title.textContent = callout.category;
+
+    const detail = document.createElement("p");
+    detail.className = "explanation-body";
+    detail.textContent = callout.detail;
+
+    item.append(title, detail);
+    list.appendChild(item);
+  }
+
+  details.append(summary, hint, toggleLabel, list);
+  return details;
 }
 
 function formatExplanationRange(label, startLine, endLine) {
@@ -795,6 +1213,8 @@ function showTextModal(options) {
 }
 
 function buildSubmitPayload() {
+  const includedFindingIds = automatedFindings.filter((finding) => state.includedFindingIds.has(finding.id)).map((finding) => finding.id);
+
   return {
     type: "submit",
     overallComment: state.overallComment.trim(),
@@ -816,6 +1236,8 @@ function buildSubmitPayload() {
         endLine: comment.endLine,
         body: comment.body.trim(),
       })),
+    ...(includedFindingIds.length > 0 ? { includedFindingIds } : {}),
+    ...(automatedCallouts.length > 0 && state.includeCallouts ? { includeCallouts: true } : {}),
   };
 }
 
@@ -838,7 +1260,7 @@ async function submitReview() {
 
   const payload = buildSubmitPayload();
   if (!hasReviewContent(payload)) {
-    showFlash("Add an overall note, an explainer reply, or a submitted comment before submitting the review.", "warning");
+    showFlash("Add an overall note, an explainer reply, a submitted comment, or include automated review findings before submitting the review.", "warning");
     return;
   }
 

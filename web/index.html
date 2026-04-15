@@ -123,9 +123,9 @@
 
       .notes-empty-state {
         color: var(--muted);
-        font-size: 0.875rem;
-        line-height: 1.5;
-        padding: 0.25rem 0;
+        font-size: 0.8125rem;
+        line-height: 1.45;
+        padding: 0.125rem 0;
       }
 
       .is-resizing,
@@ -179,6 +179,7 @@
             <button id="diff-mode-column-button" type="button" class="button button-segment">Column</button>
             <button id="diff-mode-stacked-button" type="button" class="button button-segment">Stacked</button>
           </div>
+          <div id="review-verdict" class="review-verdict" hidden></div>
           <div id="summary" class="summary"></div>
           <button id="overall-note-button" type="button" class="button">Overall note</button>
           <button id="cancel-button" type="button" class="button">Cancel</button>
@@ -224,10 +225,16 @@
         <aside class="notes-pane">
           <div class="notes-header">
             <div>
-              <div class="sidebar-title">Current file notes</div>
+              <div class="sidebar-title">Current file review</div>
               <div id="notes-pane-meta" class="sidebar-subtitle"></div>
             </div>
-            <button id="file-comment-button" type="button" class="button">Add file comment</button>
+            <div class="notes-header-actions">
+              <div class="pane-tabs" role="tablist" aria-label="Review panes">
+                <button id="notes-tab-button" type="button" class="button pane-tab-button" aria-selected="true">Notes</button>
+                <button id="findings-tab-button" type="button" class="button pane-tab-button" aria-selected="false">Findings</button>
+              </div>
+              <button id="file-comment-button" type="button" class="button">Add file comment</button>
+            </div>
           </div>
 
           <section id="file-comments" class="file-comments"></section>
