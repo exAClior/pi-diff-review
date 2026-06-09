@@ -291,13 +291,13 @@ button {
 
 .comment-card {
   display: grid;
-  gap: 0.625rem;
+  gap: 0.75rem;
   max-width: min(42rem, 100%);
-  padding: 0.75rem 0.8125rem;
-  border-radius: 0.6875rem;
+  padding: 0.875rem 0.9375rem;
+  border-radius: 0.8125rem;
   border: 1px solid var(--border);
   background: var(--panel);
-  box-shadow: 0 6px 18px rgba(1, 4, 9, 0.16);
+  box-shadow: 0 8px 22px rgba(1, 4, 9, 0.18);
 }
 
 .comment-card.inline-comment {
@@ -311,25 +311,33 @@ button {
 
 .comment-card-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 0.625rem;
+  gap: 0.75rem;
 }
 
 .comment-card-heading {
+  min-width: 0;
   display: grid;
-  gap: 0.25rem;
+  gap: 0.35rem;
 }
 
 .comment-card-title {
-  font-size: 0.8125rem;
-  font-weight: 700;
   color: #f0f6fc;
+  font-size: 0.875rem;
+  font-weight: 750;
+  line-height: 1.35;
 }
 
 .explanation-card {
-  background: color-mix(in srgb, var(--accent) 10%, var(--panel));
-  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background:
+    linear-gradient(180deg, rgba(88, 166, 255, 0.12), rgba(88, 166, 255, 0.04)),
+    var(--panel);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+}
+
+.explanation-card .comment-card-title {
+  font-size: 0.95rem;
 }
 
 .findings-overview {
@@ -461,23 +469,146 @@ button {
 
 .explanation-badge {
   width: fit-content;
-  padding: 0.15rem 0.45rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid rgba(88, 166, 255, 0.22);
   border-radius: 999px;
   font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-weight: 800;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: #9ecbff;
-  background: rgba(88, 166, 255, 0.12);
+  color: #c8e1ff;
+  background: rgba(88, 166, 255, 0.16);
 }
 
-.explanation-body,
+.explanation-body {
+  margin: 0;
+}
+
 .explanation-help-body {
   margin: 0;
   color: var(--text);
   font-size: 0.875rem;
-  line-height: 1.5;
-  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+.markdown-body {
+  display: grid;
+  gap: 0.65rem;
+  color: #d1d9e0;
+  font-size: 0.875rem;
+  line-height: 1.62;
+}
+
+.markdown-body p,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body pre,
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0;
+}
+
+.markdown-heading {
+  color: #f0f6fc;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
+.markdown-heading[data-level="1"] {
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  font-size: 1.1rem;
+}
+
+.markdown-heading[data-level="2"] {
+  color: #dbeafe;
+  font-size: 1rem;
+}
+
+.markdown-heading[data-level="3"],
+.markdown-heading[data-level="4"],
+.markdown-heading[data-level="5"],
+.markdown-heading[data-level="6"] {
+  color: #c8e1ff;
+  font-size: 0.925rem;
+}
+
+.markdown-section {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  border-left: 3px solid color-mix(in srgb, var(--accent) 76%, white 8%);
+  border-radius: 0.6875rem;
+  background: linear-gradient(90deg, rgba(88, 166, 255, 0.105), rgba(88, 166, 255, 0.035));
+}
+
+.markdown-section-title {
+  color: #9ecbff;
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.075em;
+  line-height: 1.25;
+  text-transform: uppercase;
+}
+
+.markdown-section-body {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.markdown-list {
+  display: grid;
+  gap: 0.3rem;
+  padding-left: 1.25rem;
+}
+
+.markdown-list li::marker {
+  color: #9ecbff;
+}
+
+.markdown-body strong {
+  color: #f0f6fc;
+  font-weight: 800;
+}
+
+.markdown-body em {
+  color: #dbeafe;
+}
+
+.markdown-body a {
+  color: #79c0ff;
+  text-decoration-color: rgba(121, 192, 255, 0.45);
+}
+
+.markdown-body code {
+  padding: 0.08rem 0.28rem;
+  border: 1px solid rgba(110, 118, 129, 0.28);
+  border-radius: 0.35rem;
+  background: rgba(110, 118, 129, 0.18);
+  color: #ffdfb6;
+  font: 0.82em/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.markdown-code-block {
+  overflow: auto;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.625rem;
+  background: var(--panel-alt);
+}
+
+.markdown-code-block code {
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8125rem;
+  white-space: pre;
 }
 
 .reply-label {

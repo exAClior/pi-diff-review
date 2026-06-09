@@ -16,6 +16,7 @@ import {
 } from "./explanation-reply-submission.js";
 import { highlightInlineExplanation, revealInlineExplanation as revealInlineExplanationCard } from "./inline-explanation.js";
 import { createLayoutControls } from "./layout-controls.js";
+import { createMarkdownBody } from "./markdown-renderer.js";
 import { compareReviewTreePaths, createReviewTreePaths } from "./review-tree-order.js";
 import { hasReviewContent } from "./review-submit.js";
 
@@ -777,9 +778,7 @@ function createFindingCard(finding) {
   heading.append(badge, title, locationButton);
   header.append(heading);
 
-  const body = document.createElement("p");
-  body.className = "explanation-body";
-  body.textContent = finding.body;
+  const body = createFormattedBody(finding.body);
 
   const actions = document.createElement("div");
   actions.className = "finding-actions";
@@ -863,9 +862,7 @@ function createCalloutsSection() {
     title.className = "comment-card-title";
     title.textContent = callout.category;
 
-    const detail = document.createElement("p");
-    detail.className = "explanation-body";
-    detail.textContent = callout.detail;
+    const detail = createFormattedBody(callout.detail);
 
     item.append(title, detail);
     list.appendChild(item);
@@ -912,6 +909,10 @@ function createExplanationOverviewCard(explanationCount) {
   return card;
 }
 
+function createFormattedBody(markdown) {
+  return createMarkdownBody(markdown, { className: "explanation-body markdown-body" });
+}
+
 function revealInlineExplanation(explanationId) {
   return revealInlineExplanationCard(diffRootEl, explanationId, {
     onMissing() {
@@ -942,9 +943,7 @@ function createExplanationSummaryCard(explanation) {
   heading.append(badge, title);
   header.append(heading);
 
-  const body = document.createElement("p");
-  body.className = "explanation-body";
-  body.textContent = explanation.body;
+  const body = createFormattedBody(explanation.body);
 
   const actions = document.createElement("div");
   actions.className = "explanation-summary-actions";
@@ -994,9 +993,7 @@ function createExplanationCard(explanation, options = {}) {
   heading.append(badge, title, status);
   header.append(heading);
 
-  const body = document.createElement("p");
-  body.className = "explanation-body";
-  body.textContent = explanation.body;
+  const body = createFormattedBody(explanation.body);
 
   card.append(header, body);
 
